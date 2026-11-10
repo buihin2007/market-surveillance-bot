@@ -1,6 +1,7 @@
 """Lệnh dòng lệnh. Xem: uv run qltt --help"""
 
 import sys
+from contextlib import contextmanager
 from typing import Annotated
 
 import psycopg
@@ -13,8 +14,10 @@ from qltt.config import CauHinh, cau_hinh
 app = typer.Typer(help="Chatbot tra cứu xử phạt QLTT.", no_args_is_help=True, add_completion=False)
 db_app = typer.Typer(help="Cơ sở dữ liệu Postgres.", no_args_is_help=True)
 google_app = typer.Typer(help="Google Sheet + Drive (chỉ đọc).", no_args_is_help=True)
+parse_app = typer.Typer(help="Đọc docx thành Điều, khoản, phụ lục.", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(google_app, name="google")
+app.add_typer(parse_app, name="parse")
 
 
 def dung(thong_bao: str) -> typer.Exit:
@@ -61,11 +64,7 @@ def db_init(
         typer.echo(f"Bảng {nhan.lower()}: " + ", ".join(f"{b} ({tt['so_dong'][b]})" for b in bang))
 
 
-@google_app.command("kiem-tra")
-def google_kiem_tra():
-    """Đọc thử sheet và thư mục Drive, đối chiếu mã TVPL giữa hai bên."""
-    from googleapiclient.errors import HttpError
-
+def kiem_cau_hinh_google() -> CauHinh:
     from qltt import google_io
 
     c = lay_cau_hinh()
@@ -73,20 +72,40 @@ def google_kiem_tra():
         raise dung(f"Chưa có file khóa service account ở {c.google_sa_key}.")
     if not (c.sheet_id and c.folder_id):
         raise dung("Chưa điền SHEET_ID và FOLDER_ID trong .env.")
-    email = google_io.email_service_account()
-    typer.echo(f"Service account: {email}")
+    typer.echo(f"Service account: {google_io.email_service_account()}")
+    return c
+
+
+@contextmanager
+def loi_google():
+    """Đổi lỗi của Google thành thông báo dễ hiểu."""
+    from googleapiclient.errors import HttpError
+
+    from qltt import google_io
+
+    c = cau_hinh()
     try:
-        dong = google_io.doc_sheet()
-        files = google_io.liet_ke_file()
+        yield
     except google_io.LoiTieuDe as e:
         raise dung(f"Sheet '{c.sheet_tab}': {e}") from None
     except HttpError as e:
         goi_y = {
-            403: f"Đã share thư mục cho {email} (quyền Người xem) chưa? "
-            "Đã bật Sheets API và Drive API chưa?",
+            403: f"Đã share thư mục cho {google_io.email_service_account()} (quyền Người xem) "
+            "chưa? Đã bật Sheets API và Drive API chưa?",
             404: "Kiểm tra SHEET_ID, FOLDER_ID, SHEET_TAB và việc share thư mục.",
         }.get(e.status_code, "")
         raise dung(f"Google trả lỗi {e.status_code}: {e.reason}\n{goi_y}") from None
+
+
+@google_app.command("kiem-tra")
+def google_kiem_tra():
+    """Đọc thử sheet và thư mục Drive, đối chiếu mã TVPL giữa hai bên."""
+    from qltt import google_io
+
+    c = kiem_cau_hinh_google()
+    with loi_google():
+        dong = google_io.doc_sheet()
+        files = google_io.liet_ke_file()
 
     ma_dong = [tvpl.id_tu_link(str(d["link_tvpl"])) for d in dong]
     ma_file = [tvpl.id_tu_ten_file(f["name"]) for f in files]
@@ -135,6 +154,103 @@ def google_kiem_tra():
             typer.echo(f"  {nhan} ({len(ds)}): " + ", ".join(map(str, ds)))
     if not any(canh_bao.values()):
         typer.echo("  Không có cảnh báo.")
+
+
+@google_app.command("tai")
+def google_tai():
+    """Tải về máy các file docx chưa có bản sao (data/raw/{mã}/{md5}.docx)."""
+    from qltt import google_io, kho_file
+
+    c = kiem_cau_hinh_google()
+    with loi_google():
+        files = google_io.liet_ke_file()
+    typer.echo(f"Drive: {len(files)} file. Đang tải file chưa có vào {c.thu_muc_raw} ...")
+
+    def tai(f: dict) -> bytes:
+        typer.echo(f"  tải {f['name']}")
+        return google_io.tai_noi_dung(f)
+
+    kq = kho_file.dong_bo_file(files, c.thu_muc_raw, tai)
+    dung_luong = sum(p.stat().st_size for p in kq.moi) / 1e6
+    typer.echo(
+        f"Mới tải: {len(kq.moi)} file ({dung_luong:.1f} MB). Đã có sẵn: {len(kq.da_co)}. "
+        f"Bỏ qua: {len(kq.bo_qua)}. Lỗi: {len(kq.loi)}."
+    )
+    for dong in kq.bo_qua + kq.loi:
+        typer.echo(f"  {dong}")
+    if kq.loi:
+        raise typer.Exit(1)
+
+
+@parse_app.command("kiem-tra")
+def parse_kiem_tra(
+    ma: Annotated[
+        int | None, typer.Option("--ma", help="Chỉ một văn bản (mã TVPL), in danh sách Điều")
+    ] = None,
+):
+    """Parse các docx đã tải về, chạy gate, ghi kết quả ra data/parse/{mã}.json để xem."""
+    import dataclasses
+    import json
+
+    from qltt import gate, google_io
+    from qltt import parse as ps
+
+    c = kiem_cau_hinh_google()
+    with loi_google():
+        sheet = {tvpl.id_tu_link(str(d["link_tvpl"])): d for d in google_io.doc_sheet()}
+    files = {}  # mã → bản sao mới nhất
+    for p in sorted(c.thu_muc_raw.glob("*/*.docx"), key=lambda p: p.stat().st_mtime):
+        if p.parent.name.isdigit():
+            files[int(p.parent.name)] = p
+    if ma is not None:
+        files = {ma: files[ma]} if ma in files else {}
+    if not files:
+        raise dung(f"Không có docx nào trong {c.thu_muc_raw}. Chạy `qltt google tai` trước.")
+
+    ra = c.thu_muc_raw.parent / "parse"
+    ra.mkdir(parents=True, exist_ok=True)
+    dem = {"qua": 0, "dieu": 0, "khoan": 0, "pl_giu": 0, "pl_bo": 0}
+    for m, p in sorted(files.items()):
+        d = sheet.get(m)
+        if d is None:
+            typer.echo(f"BỎ QUA {m}: không có dòng trên sheet")
+            continue
+        ngay = d["ngay_ban_hanh"]
+        ngay = google_io.ngay_tu_serial(ngay) if isinstance(ngay, int | float) else None
+        vb = ps.parse(p)
+        g = gate.kiem(vb, str(d["so_hieu"]), ngay)
+        (ra / f"{m}.json").write_text(
+            json.dumps(
+                dataclasses.asdict(vb) | {"gate": dataclasses.asdict(g)},
+                default=str,
+                ensure_ascii=False,
+                indent=1,
+            ),
+            encoding="utf-8",
+        )
+        dem["qua"] += g.qua
+        dem["dieu"] += len(vb.dieu)
+        dem["khoan"] += sum(len(x.khoan) for x in vb.dieu)
+        dem["pl_giu"] += sum(x.la_danh_muc for x in vb.phu_luc)
+        dem["pl_bo"] += sum(not x.la_danh_muc for x in vb.phu_luc)
+        if g.loi or g.canh_bao:
+            typer.echo(f"{'TRƯỢT' if g.loi else 'CẢNH BÁO'} {m} {d['so_hieu']}")
+            for x in g.loi:
+                typer.echo(f"    lỗi: {x}")
+            for x in g.canh_bao:
+                typer.echo(f"    cảnh báo: {x}")
+        if ma is not None:
+            for x in vb.dieu:
+                typer.echo(f"  Điều {x.ky_hieu}. {x.ten[:70]} ({len(x.khoan)} khoản)")
+            for x in vb.phu_luc:
+                typer.echo(f"  Phụ lục {x.so} {x.ten[:60]} [{'giữ' if x.la_danh_muc else 'bỏ'}]")
+
+    typer.echo(
+        f"Qua gate: {dem['qua']}/{len(files)}. Điều: {dem['dieu']}, khoản: {dem['khoan']}, "
+        f"phụ lục giữ: {dem['pl_giu']}, bỏ: {dem['pl_bo']}. Chi tiết từng văn bản: {ra}"
+    )
+    if dem["qua"] < len(files):
+        raise typer.Exit(1)
 
 
 def main() -> None:

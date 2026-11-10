@@ -23,6 +23,9 @@ class CauHinh(BaseSettings):
     sheet_tab: str = "Van_ban"
     folder_id: str = ""  # thư mục "Văn bản" trên Drive
 
+    # bản sao docx trên máy, dựng lại được từ Drive
+    thu_muc_raw: Path = Path("data/raw")
+
 
 @lru_cache
 def cau_hinh() -> CauHinh:

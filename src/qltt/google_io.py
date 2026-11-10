@@ -1,12 +1,17 @@
 """Đọc Google Sheet và liệt kê thư mục Drive bằng service account (chỉ quyền đọc)."""
 
+import io
 import unicodedata
 from datetime import date, timedelta
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 
 from qltt.config import cau_hinh
+from qltt.kho_file import GDOC_MIME
+
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 SCOPES = (
     "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -109,3 +114,18 @@ def liet_ke_file() -> list[dict]:
         trang = kq.get("nextPageToken")
         if not trang:
             return files
+
+
+def tai_noi_dung(f: dict) -> bytes:
+    """Tải nội dung một file Drive. File đã bị đổi sang Google Docs thì xuất lại ra docx."""
+    drive = build("drive", "v3", credentials=_creds(), cache_discovery=False)
+    if f.get("mimeType") == GDOC_MIME:
+        yeu_cau = drive.files().export_media(fileId=f["id"], mimeType=DOCX_MIME)
+    else:
+        yeu_cau = drive.files().get_media(fileId=f["id"], supportsAllDrives=True)
+    buf = io.BytesIO()
+    tai = MediaIoBaseDownload(buf, yeu_cau)
+    xong = False
+    while not xong:
+        _, xong = tai.next_chunk()
+    return buf.getvalue()

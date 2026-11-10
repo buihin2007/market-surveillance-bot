@@ -53,8 +53,14 @@ def gia_lap_google(monkeypatch):
     Gọi gia_lap_google([(200, {...}), ...]); trả về đối tượng ghi lại các request đã gửi.
     """
 
-    def tao(tra_loi: list[tuple[int, dict]]) -> HttpMockSequence:
-        http = HttpMockSequence([({"status": str(ma)}, json.dumps(nd)) for ma, nd in tra_loi])
+    def tao(tra_loi: list[tuple[int, dict | bytes]]) -> HttpMockSequence:
+        # nd là dict → trả JSON; bytes → trả nguyên nội dung (tải file)
+        http = HttpMockSequence(
+            [
+                ({"status": str(ma)}, nd if isinstance(nd, bytes) else json.dumps(nd))
+                for ma, nd in tra_loi
+            ]
+        )
         monkeypatch.setenv("POSTGRES_PASSWORD", "x")
         monkeypatch.setenv("SHEET_ID", "ma_sheet")
         monkeypatch.setenv("SHEET_TAB", "Van_ban")

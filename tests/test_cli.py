@@ -74,3 +74,30 @@ def test_google_tu_choi_thi_goi_y_share(moi_truong_gia, tmp_path, gia_lap_google
     assert "Google trả lỗi 403: The caller does not have permission" in kq.output
     assert "share thư mục cho bot@x.iam" in kq.output
     assert "Traceback" not in kq.output
+
+
+def test_parse_kiem_tra(moi_truong_gia, tmp_path):
+    from test_parse import tao_docx
+
+    (tmp_path / "khoa.json").write_text("{}")
+    for bien, gt in {"POSTGRES_PASSWORD": "x", "SHEET_ID": "s", "FOLDER_ID": "f"}.items():
+        moi_truong_gia.setenv(bien, gt)
+    moi_truong_gia.setenv("GOOGLE_SA_KEY", str(tmp_path / "khoa.json"))
+    moi_truong_gia.setenv("THU_MUC_RAW", str(tmp_path / "data" / "raw"))
+    (tmp_path / "data" / "raw" / "406627").mkdir(parents=True)
+    (tmp_path / "data" / "raw" / "502253").mkdir(parents=True)
+    tao_docx(tmp_path / "data" / "raw" / "406627", ["Điều 1. A", "Điều 2. B"], ten="a.docx")
+    tao_docx(tmp_path / "data" / "raw" / "502253", ["Điều 1. A"], ten="b.docx")  # số sai
+    dong = [
+        {"so_hieu": "98/2020/NĐ-CP", "ngay_ban_hanh": 44069, "link_tvpl": "x-406627.aspx"},
+        {"so_hieu": "17/2022/NĐ-CP", "ngay_ban_hanh": 44592, "link_tvpl": "x-502253.aspx"},
+    ]
+    moi_truong_gia.setattr(google_io, "email_service_account", lambda: "bot@x.iam")
+    moi_truong_gia.setattr(google_io, "doc_sheet", lambda: dong)
+
+    kq = chay.invoke(app, ["parse", "kiem-tra"])
+
+    assert kq.exit_code == 1, kq.output
+    assert "TRƯỢT 502253 17/2022/NĐ-CP" in kq.output
+    assert "Qua gate: 1/2. Điều: 3" in kq.output
+    assert (tmp_path / "data" / "parse" / "406627.json").exists()

@@ -85,3 +85,21 @@ def test_liet_ke_file_di_het_cac_trang(gia_lap_google):
     uri_1, uri_2 = (r[0] for r in http.request_sequence)
     assert "%27ma_thu_muc%27+in+parents+and+trashed+%3D+false" in uri_1
     assert "pageToken=trang2" in uri_2
+
+
+def test_tai_noi_dung_file_docx(gia_lap_google):
+    http = gia_lap_google([(200, b"PK noi dung")])
+
+    assert google_io.tai_noi_dung({"id": "abc", "mimeType": "docx"}) == b"PK noi dung"
+    assert "/files/abc?" in http.request_sequence[0][0]
+    assert "alt=media" in http.request_sequence[0][0]
+
+
+def test_tai_noi_dung_google_docs_thi_xuat_docx(gia_lap_google):
+    http = gia_lap_google([(200, b"PK xuat ra")])
+
+    f = {"id": "abc", "mimeType": "application/vnd.google-apps.document"}
+    assert google_io.tai_noi_dung(f) == b"PK xuat ra"
+    uri = http.request_sequence[0][0]
+    assert "/files/abc/export?" in uri
+    assert "wordprocessingml" in uri

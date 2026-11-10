@@ -9,6 +9,7 @@ dependencies = [
     "google-auth>=2.62.1",
     "psycopg[binary]>=3.3.8",
     "pydantic-settings>=2.16.2",
+    "python-docx>=1.2.0",
     "typer>=0.29.0",
 ]
 
