@@ -26,6 +26,12 @@ class CauHinh(BaseSettings):
     # bản sao docx trên máy, dựng lại được từ Drive
     thu_muc_raw: Path = Path("data/raw")
 
+    # LLM + embedding qua API kiểu OpenAI (mặc định OpenRouter). Đổi model chỉ cần sửa .env.
+    llm_api_key: SecretStr = SecretStr("")
+    llm_base_url: str = "https://openrouter.ai/api/v1"
+    embed_model: str = "openai/text-embedding-3-small"  # đổi model này = phải embed lại toàn kho
+    embed_gia_1m_token: float = 0.02  # USD, chỉ để in ước tính chi phí
+
 
 @lru_cache
 def cau_hinh() -> CauHinh:

@@ -2,6 +2,7 @@
 
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Annotated
 
 import psycopg
@@ -17,7 +18,9 @@ google_app = typer.Typer(help="Google Sheet + Drive (chỉ đọc).", no_args_is
 parse_app = typer.Typer(help="Đọc docx thành Điều, khoản, phụ lục.", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(google_app, name="google")
+eval_app = typer.Typer(help="Bộ đánh giá eval/cases.jsonl.", no_args_is_help=True)
 app.add_typer(parse_app, name="parse")
+app.add_typer(eval_app, name="eval")
 
 
 def dung(thong_bao: str) -> typer.Exit:
@@ -34,6 +37,18 @@ def lay_cau_hinh() -> CauHinh:
         raise dung(f"Cấu hình thiếu hoặc sai: {bien}. Xem .env.example.") from None
 
 
+def ket_noi_db() -> psycopg.Connection:
+    c = lay_cau_hinh()
+    try:
+        return db.ket_noi()
+    except psycopg.OperationalError as e:
+        dong_dau = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+        raise dung(
+            f"Không kết nối được Postgres ở {c.db_host}:{c.db_port}: {dong_dau}\n"
+            "Đã chạy `docker compose up -d db` chưa? Mật khẩu trong .env có đúng không?"
+        ) from None
+
+
 @db_app.command("init")
 def db_init(
     xoa_dan_xuat: Annotated[
@@ -46,15 +61,7 @@ def db_init(
 ):
     """Tạo extension, bảng, index. Chạy lại nhiều lần không sao."""
     c = lay_cau_hinh()
-    try:
-        conn = db.ket_noi()
-    except psycopg.OperationalError as e:
-        dong_dau = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
-        raise dung(
-            f"Không kết nối được Postgres ở {c.db_host}:{c.db_port}: {dong_dau}\n"
-            "Đã chạy `docker compose up -d db` chưa? Mật khẩu trong .env có đúng không?"
-        ) from None
-    with conn:
+    with ket_noi_db() as conn:
         db.khoi_tao(conn, xoa_dan_xuat=xoa_dan_xuat)
         tt = db.thong_tin(conn)
     typer.echo(f"Postgres {tt['postgres']} tại {c.db_host}:{c.db_port}/{c.db_name}")
@@ -250,6 +257,148 @@ def parse_kiem_tra(
         f"phụ lục giữ: {dem['pl_giu']}, bỏ: {dem['pl_bo']}. Chi tiết từng văn bản: {ra}"
     )
     if dem["qua"] < len(files):
+        raise typer.Exit(1)
+
+
+@app.command("nap")
+def nap_lenh(
+    lam_lai: Annotated[
+        bool, typer.Option("--lam-lai", help="Parse lại cả văn bản có file không đổi")
+    ] = False,
+):
+    """Đọc sheet + Drive, tải file mới, parse, ghi vào DB, tính lại trạng thái. Chưa embed."""
+    from datetime import date
+
+    from qltt import google_io, kho_file, nap
+
+    c = kiem_cau_hinh_google()
+    with loi_google():
+        dong = google_io.doc_sheet()
+        files = google_io.liet_ke_file()
+    # mỗi mã một file: lấy bản sửa gần nhất trên Drive
+    theo_ma: dict[int, dict] = {}
+    for f in sorted(files, key=lambda f: f.get("modifiedTime", "")):
+        if (m := tvpl.id_tu_ten_file(f["name"])) is not None:
+            theo_ma[m] = f
+    kq_tai = kho_file.dong_bo_file(list(theo_ma.values()), c.thu_muc_raw, google_io.tai_noi_dung)
+    if kq_tai.moi:
+        typer.echo(f"Tải mới {len(kq_tai.moi)} file từ Drive.")
+
+    bao: dict[str, list[str]] = {"Lỗi sheet": [], "Dòng chưa có file": [], "Trượt gate": []}
+    so_nap = so_giu = so_chunk = 0
+    ma_sheet = set()
+    with ket_noi_db() as conn:
+        da_co = dict(conn.execute("SELECT tvpl_id, file_hash FROM van_ban").fetchall())
+        for d in dong:
+            ma = tvpl.id_tu_link(str(d["link_tvpl"]))
+            if ma is None:
+                bao["Lỗi sheet"].append(f"dòng {d['dong']}: link không có mã TVPL")
+                continue
+            ma_sheet.add(ma)
+            ds = nap.dong_tu_sheet(d, ma, google_io.ngay_tu_serial)
+            if isinstance(ds, str):
+                bao["Lỗi sheet"].append(ds)
+                continue
+            f = theo_ma.get(ma)
+            if f is None:
+                bao["Dòng chưa có file"].append(f"{ds.so_hieu} (dòng {ds.dong})")
+                continue
+            md5 = kho_file.ten_ban_sao(f)
+            if da_co.get(ma) == md5 and not lam_lai:
+                nap.cap_nhat_dong(conn, ds)
+                so_giu += 1
+                continue
+            kq = nap.nap_van_ban(
+                conn, ds, kho_file.duong_dan(c.thu_muc_raw, ma, md5), md5, f.get("id")
+            )
+            if kq.loi:
+                bao["Trượt gate"].append(f"{ds.so_hieu}: " + "; ".join(kq.loi[:3]))
+            else:
+                so_nap += 1
+                so_chunk += kq.so_chunk
+        conn.commit()
+        nap.tinh_lai(conn, date.today())
+        tk = nap.thong_ke(conn)
+
+    bao["File chưa có dòng sheet"] = [f["name"] for m, f in theo_ma.items() if m not in ma_sheet]
+    typer.echo(f"Nạp/parse lại: {so_nap} văn bản, {so_chunk} chunk. File không đổi: {so_giu}.")
+    for nhan, ds in bao.items():
+        if ds:
+            typer.echo(f"{nhan} ({len(ds)}):")
+            for x in ds:
+                typer.echo(f"  {x}")
+    tt = ", ".join(f"{k} {v}" for k, v in sorted(tk["trang_thai"].items()))
+    typer.echo(
+        f"Trong DB: {tk['van_ban']} văn bản ({tt}); {tk['dung_de_tra']} dùng để tra; "
+        f"{tk['chunk']} chunk, {tk['chunk_tim_kiem']} chunk sẽ được tìm kiếm."
+    )
+
+
+@app.command("embed")
+def embed_lenh():
+    """Tạo vector cho các chunk chưa có (tra cache trước, chỉ trả tiền cho phần thiếu)."""
+    import openai
+
+    from qltt import embed
+
+    c = lay_cau_hinh()
+    if not c.llm_api_key.get_secret_value():
+        raise dung("Chưa điền LLM_API_KEY trong .env.")
+    client = embed.tao_client(c.llm_api_key.get_secret_value(), c.llm_base_url)
+    typer.echo(f"Model: {c.embed_model} qua {c.llm_base_url}")
+
+    def bao(kq: embed.KetQuaEmbed):
+        typer.echo(f"  {kq.tu_cache + kq.tu_api}/{kq.can} chunk, {kq.token:,} token")
+
+    with ket_noi_db() as conn:
+        conn.autocommit = True  # mỗi lô tự commit: dừng giữa chừng không mất phần đã làm
+        try:
+            kq = embed.embed_tat_ca(conn, client, c.embed_model, bao)
+        except openai.AuthenticationError:
+            raise dung("API key bị từ chối. Kiểm tra LLM_API_KEY trong .env.") from None
+        except (openai.NotFoundError, openai.BadRequestError) as e:
+            raise dung(f"API báo lỗi với model {c.embed_model}: {e}") from None
+        except openai.APIError as e:
+            raise dung(f"Gọi API lỗi: {e}. Chạy lại lệnh để làm tiếp từ chỗ dừng.") from None
+        con_thieu = conn.execute(
+            "SELECT count(*) FROM chunk WHERE embed AND embedding IS NULL"
+        ).fetchone()[0]
+    chi_phi = kq.token / 1e6 * c.embed_gia_1m_token
+    typer.echo(
+        f"Xong: {kq.can} chunk cần vector, {kq.tu_cache} lấy từ cache, {kq.tu_api} gọi API "
+        f"({kq.so_lan_goi} lần, {kq.token:,} token, ~{chi_phi:.3f} USD). Còn thiếu: {con_thieu}."
+    )
+
+
+@eval_app.command("kiem-tra")
+def eval_kiem_tra(
+    file: Annotated[Path, typer.Option(help="File case.")] = Path("eval/cases.jsonl"),
+):
+    """Kiểm từng căn cứ trong bộ đánh giá có trỏ đúng tới chunk đang được tìm kiếm không."""
+    from collections import Counter
+
+    from qltt import danh_gia
+
+    try:
+        cases = danh_gia.doc_cases(file)
+    except FileNotFoundError:
+        raise dung(f"Không thấy {file}.") from None
+    except ValueError as e:
+        raise dung(f"{file} sai định dạng:\n{e}") from None
+    with ket_noi_db() as conn:
+        dap_an = [danh_gia.giai(conn, c) for c in cases]
+    so_loi = 0
+    for da in dap_an:
+        if da.loi:
+            so_loi += 1
+            typer.echo(f"LỖI {da.case.id}: " + "; ".join(da.loi))
+    dem = Counter((c.nhom, c.kiem) for c in cases)
+    typer.echo(
+        f"{len(cases)} case: "
+        + ", ".join(f"{n}/{k} {s}" for (n, k), s in sorted(dem.items()))
+        + f"; giữ lại {sum(c.giu_lai for c in cases)}; {so_loi} case lỗi."
+    )
+    if so_loi:
         raise typer.Exit(1)
 
 

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS van_ban (
     -- lấy từ sheet và file
     so_hieu_chuan     text    NOT NULL,     -- so_hieu đã chuẩn hóa ký tự, để so với dòng "Số:" trong file
     ten               text,
+    chi_sua_van_ban   text,                 -- văn bản sửa đổi chỉ sửa đúng một văn bản: số hiệu chuẩn của nó
     drive_file_id     text,
     file_hash         text,                 -- md5 của file đang dùng; đổi thì parse lại
     -- kết quả parse lần gần nhất (file mới trượt gate thì giữ nguyên chunk cũ, chỉ ghi canh_bao)
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS van_ban (
     qltt_lien_quan    boolean NOT NULL DEFAULT false,
     mucphat_cua       text    CHECK (mucphat_cua IN ('ca_nhan', 'to_chuc')),
     mucphat_ngoai_le  jsonb   NOT NULL DEFAULT '[]',
-    canh_bao          jsonb   NOT NULL DEFAULT '[]',
+    canh_bao          jsonb   NOT NULL DEFAULT '[]',  -- cảnh báo của lần parse gần nhất
+    loi               jsonb   NOT NULL DEFAULT '[]',  -- lỗi gate lần gần nhất; có chunk cũ thì vẫn dùng chunk cũ
     dong_bo_luc       timestamptz,
     -- số hiệu VBHN lặp lại theo năm (03/VBHN-BCT có bản 2022 và 2025) nên phải kèm ngày
     UNIQUE (so_hieu_chuan, ngay_ban_hanh)
@@ -56,19 +58,21 @@ CREATE TABLE IF NOT EXISTS van_ban (
 CREATE TABLE IF NOT EXISTS chunk (
     id             bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     tvpl_id        integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
-    cap            text    NOT NULL CHECK (cap IN ('dieu', 'khoan')),
-    dieu_so        integer NOT NULL,
+    cap            text    NOT NULL CHECK (cap IN ('dieu', 'khoan', 'phu_luc')),
+    dieu_so        integer,                      -- trống với phụ lục
     dieu_suffix    text    NOT NULL DEFAULT '',  -- "a" trong Điều 4a
     khoan_so       integer,                      -- trống nếu cap = 'dieu'
     khoan_suffix   text    NOT NULL DEFAULT '',  -- "a" trong khoản 2a
+    phu_luc_so     text,                         -- "01", "II"; chỉ với cap = 'phu_luc'
     cha_id         bigint  REFERENCES chunk ON DELETE CASCADE,  -- chunk Điều chứa khoản này
     duong_dan      text    NOT NULL,             -- "Điều 17 khoản 1"
+    phan_ten       text,
     chuong_ten     text,
     muc_ten        text,
     dieu_ten       text,
     loai_chunk     text    NOT NULL CHECK (loai_chunk IN (
                        'hanh_vi', 'xu_phat_bo_sung', 'khac_phuc', 'giai_thich',
-                       'quy_dinh_chung', 'tham_quyen', 'hieu_luc', 'khac')),
+                       'quy_dinh_chung', 'tham_quyen', 'hieu_luc', 'phu_luc', 'khac')),
     vai_tro        text    NOT NULL CHECK (vai_tro IN ('xu_phat', 'quy_pham')),
     noi_dung       text    NOT NULL,
     noi_dung_embed text,                         -- noi_dung kèm prefix ngữ cảnh
@@ -119,7 +123,9 @@ CREATE TABLE IF NOT EXISTS quan_he_van_ban (
     tu          integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
     den_so_hieu text    NOT NULL,
     den         integer REFERENCES van_ban ON DELETE SET NULL,  -- trống nếu văn bản kia chưa có trong kho
-    loai        text    NOT NULL CHECK (loai IN ('thay_the', 'sua_doi', 'bai_bo', 'hop_nhat', 'huong_dan')),
+    loai        text    NOT NULL CHECK (loai IN (
+                    'thay_the', 'sua_doi', 'bai_bo', 'hop_nhat', 'hop_nhat_sua', 'huong_dan')),
+    -- hop_nhat: VBHN → văn bản gốc; hop_nhat_sua: VBHN → văn bản sửa đổi đã được hợp nhất
     nguon       text    NOT NULL CHECK (nguon IN ('dieu_hieu_luc', 'dau_vbhn', 'tay')),
     PRIMARY KEY (tu, den_so_hieu, loai)
 );

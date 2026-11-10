@@ -9,7 +9,9 @@ import pytest
 from qltt.parse import chuan, chuan_so_hieu, parse
 
 
-def tao_docx(tmp_path, dong, so="98/2020/NĐ-CP", ngay="ngày 26 tháng 8 năm 2020", ten="vb.docx"):
+def tao_docx(
+    tmp_path, dong, so="98/2020/NĐ-CP", ngay="ngày 26 tháng 8 năm 2020", ten="vb.docx", dau=()
+):
     """dong: chuỗi = một đoạn; list[list[str]] = một bảng. Đầu là bảng quốc hiệu như TVPL."""
     d = docx.Document()
     bang = d.add_table(rows=2, cols=2)
@@ -17,7 +19,7 @@ def tao_docx(tmp_path, dong, so="98/2020/NĐ-CP", ngay="ngày 26 tháng 8 năm 2
     bang.cell(0, 1).text = "CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM"
     bang.cell(1, 0).text = f"Số: {so}"
     bang.cell(1, 1).text = f"Hà Nội, {ngay}"
-    for x in ["NGHỊ ĐỊNH", "Căn cứ Luật Tổ chức Chính phủ;", *dong]:
+    for x in ["NGHỊ ĐỊNH", *dau, "Căn cứ Luật Tổ chức Chính phủ;", *dong]:
         if isinstance(x, str):
             d.add_paragraph(x)
         else:

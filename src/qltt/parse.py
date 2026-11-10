@@ -61,6 +61,19 @@ R_LENH = re.compile(
     r"\b(?:được|đã được)\s+(?:sửa đổi|bổ sung|bãi bỏ|thay)"
 )
 R_DIEU_KET = re.compile(r"Sửa đổi|Bổ sung|Bãi bỏ|[Hh]iệu lực|[Tt]rách nhiệm|thi hành|Điều khoản")
+LOAI_GOC = (
+    "THÔNG TƯ LIÊN TỊCH",
+    "NGHỊ ĐỊNH",
+    "THÔNG TƯ",
+    "LUẬT",
+    "PHÁP LỆNH",
+    "QUYẾT ĐỊNH",
+    "NGHỊ QUYẾT",
+)
+R_SO_TRONG_CAU = re.compile(r"số\s+(\d+/\d{4}/[A-ZĐ0-9-]*[A-ZĐ0-9])")
+R_HET_GIOI_THIEU = re.compile(
+    r"^(?:Căn cứ|Theo đề nghị|Chính phủ ban hành|Quốc hội ban hành|Bộ trưởng)"
+)
 R_PHU_LUC = re.compile(r"^(?:PHỤ\s*LỤC|Phụ\s*lục)\b(.*)$")
 R_ENDNOTE = re.compile(r"^\[(\d+)\]\s*(.*)$")
 R_CHU_THICH = re.compile(r"\[(\d+)\]")
@@ -124,13 +137,26 @@ class VanBanParse:
     co_file_nhung: bool
     ky_tu_tong: int
     ky_tu_dieu: int
+    loai_goc: str | None = (
+        None  # dòng tên loại ở đầu: "NGHỊ ĐỊNH", "LUẬT"... (VBHN: loại của văn bản gốc)
+    )
+    ten: str = ""  # tên văn bản (dòng chữ in hoa sau tên loại)
+    hop_nhat: list[str] = field(default_factory=list)  # VBHN: số hiệu văn bản gốc + các văn bản sửa
 
 
 # ---------- đọc docx ----------
 
 
+_W_T, _W_NGAT = qn("w:t"), {qn("w:br"), qn("w:cr"), qn("w:tab")}
+
+
 def _text_p(p) -> str:
-    return "".join(x.text or "" for x in p.iter(qn("w:t")))
+    """Chữ của một đoạn; xuống dòng mềm và tab thành dấu cách ("LUẬT<br>THỦY SẢN")."""
+    return "".join(
+        (x.text or "") if x.tag == _W_T else " "
+        for x in p.iter()
+        if x.tag == _W_T or x.tag in _W_NGAT
+    )
 
 
 def _footnote_ids(p) -> list[int]:
@@ -198,6 +224,26 @@ def _dau_van_ban(pt) -> tuple[str | None, date | None]:
     return so, ngay
 
 
+def _gioi_thieu(dau_dong: list[str]) -> tuple[str | None, str, list[str]]:
+    """Từ các đoạn trước Điều 1: tên loại, tên văn bản, danh sách số hiệu VBHN hợp nhất."""
+    loai = None
+    ten: list[str] = []
+    hop_nhat: list[str] = []
+    for t in dau_dong:
+        if loai is None:
+            loai = next((x for x in LOAI_GOC if t == x or t.startswith(x + " ")), None)
+            if loai and t != loai:
+                ten.append(t[len(loai) :].strip())  # "LUẬT GIÁ" trên một dòng
+            continue
+        if R_HET_GIOI_THIEU.match(t):
+            break
+        if t.isupper() and not hop_nhat:
+            ten.append(t)
+        elif m := R_SO_TRONG_CAU.search(t):
+            hop_nhat.append(m.group(1))
+    return loai, " ".join(ten), hop_nhat
+
+
 def _thoat_khoi(t: str, dieu: list[Dieu]) -> bool:
     """Đoạn đang bị coi là trong khối trích nhưng thực ra là câu lệnh cấp văn bản sửa đổi:
     khoản số kế tiếp chứa "như sau"/"Sửa đổi…", hoặc Điều số kế tiếp của chính văn bản."""
@@ -227,6 +273,7 @@ def parse(path: str | Path) -> VanBanParse:
     trong_ngoac = False  # đang trong khối trích dẫn nhiều đoạn (nội dung sửa đổi)
     pl: dict | None = None
     note_hien_tai: int | None = None
+    dau_dong: list[str] = []
 
     def them_vao_dieu(t: str, cac_fn: list[int]):
         d = dieu[-1]
@@ -257,6 +304,8 @@ def parse(path: str | Path) -> VanBanParse:
     for kieu, t, cac_fn in pt:
         if not t:
             continue
+        if trang == "dau" and kieu == "p":
+            dau_dong.append(t)
 
         # --- chuyển trạng thái (chỉ ngoài khối ngoặc kép) ---
         if not trong_ngoac and trang != "dau":
@@ -360,6 +409,7 @@ def parse(path: str | Path) -> VanBanParse:
     dong_phu_luc()
     chu_thich = {k: chuan(" ".join(v)) for k, v in endnote.items()} or fn_word
     ky_tu_tong = sum(len(t) for _, t, _ in pt)
+    loai_goc, ten, hop_nhat = _gioi_thieu(dau_dong)
     return VanBanParse(
         so_hieu=so_hieu,
         ngay_ky=ngay_ky,
@@ -369,4 +419,7 @@ def parse(path: str | Path) -> VanBanParse:
         co_file_nhung=_co_file_nhung(path),
         ky_tu_tong=ky_tu_tong,
         ky_tu_dieu=sum(len(d.text) for d in dieu),
+        loai_goc=loai_goc,
+        ten=ten,
+        hop_nhat=hop_nhat,
     )
