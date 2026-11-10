@@ -1,8 +1,9 @@
 """Tạo embedding cho chunk, qua API kiểu OpenAI (mặc định OpenRouter).
 
-Tra embed_cache trước, chỉ gọi API cho phần thiếu. Mỗi lô ghi trong một transaction riêng (gọi
-với kết nối autocommit): đứt giữa chừng thì chạy lại, làm tiếp từ chỗ dừng. Không có gì mới → 0
-lời gọi API.
+Chunk cần vector = chunk có embed_hash khác khóa (model, chữ) hiện tại: chunk mới, chữ đổi, hoặc
+đổi EMBED_MODEL. Tra embed_cache trước, chỉ gọi API cho phần thiếu. Mỗi lô ghi trong một transaction
+riêng (gọi với kết nối autocommit): đứt giữa chừng thì chạy lại, làm tiếp từ chỗ dừng. Không có gì
+mới → 0 lời gọi API.
 """
 
 import hashlib
@@ -11,7 +12,6 @@ from dataclasses import dataclass
 
 import psycopg
 
-SO_CHIEU = 1536  # text-embedding-3-small; khớp vector(1536) trong schema
 LO_TOI_DA = 96  # số chunk mỗi request
 KY_TU_LO_TOI_DA = 150_000  # ~ 75-150 nghìn token tiếng Việt mỗi request
 
@@ -60,8 +60,8 @@ def goi_api(client, model: str, texts: list[str]) -> tuple[list[list[float]], in
         extra = {"provider": {"data_collection": "deny"}}  # chỉ qua nhà cung cấp không lưu dữ liệu
     r = client.embeddings.create(model=model, input=texts, extra_body=extra)
     vec = [d.embedding for d in sorted(r.data, key=lambda d: d.index)]
-    if len(vec) != len(texts) or any(len(v) != SO_CHIEU for v in vec):
-        raise ValueError(f"API trả {len(vec)} vector, cần {len(texts)} vector {SO_CHIEU} chiều")
+    if len(vec) != len(texts) or len({len(v) for v in vec}) > 1:
+        raise ValueError(f"API trả {len(vec)} vector, cần {len(texts)} vector cùng số chiều")
     return vec, (r.usage.total_tokens if r.usage else 0)
 
 
@@ -73,9 +73,14 @@ def embed_tat_ca(
 ) -> KetQuaEmbed:
     kq = KetQuaEmbed()
     rows = conn.execute(
-        "SELECT id, noi_dung_embed FROM chunk WHERE embed AND embedding IS NULL ORDER BY id"
+        "SELECT id, noi_dung_embed, embed_hash, embedding IS NULL FROM chunk"
+        " WHERE embed ORDER BY id"
     ).fetchall()
-    cac = [(cid, khoa(model, t), t) for cid, t in rows]
+    cac = []
+    for cid, t, cu, rong in rows:
+        h = khoa(model, t)
+        if rong or cu != h:
+            cac.append((cid, h, t))
     kq.can = len(cac)
 
     # 1. lấy từ cache

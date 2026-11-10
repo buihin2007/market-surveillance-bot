@@ -370,6 +370,75 @@ def embed_lenh():
     )
 
 
+def client_embed(c: CauHinh):
+    from qltt import embed
+
+    if not c.llm_api_key.get_secret_value():
+        raise dung("Chưa điền LLM_API_KEY trong .env (hoặc chạy với --chi-tu-khoa).")
+    return embed.tao_client(c.llm_api_key.get_secret_value(), c.llm_base_url)
+
+
+@contextmanager
+def loi_openai(model: str):
+    import openai
+
+    try:
+        yield
+    except openai.AuthenticationError:
+        raise dung("API key bị từ chối. Kiểm tra LLM_API_KEY trong .env.") from None
+    except (openai.NotFoundError, openai.BadRequestError) as e:
+        raise dung(f"API báo lỗi với model {model}: {e}") from None
+    except openai.APIError as e:
+        raise dung(f"Gọi API lỗi: {e}. Chạy lại lệnh.") from None
+
+
+@app.command("tim")
+def tim_lenh(
+    cau_hoi: Annotated[str, typer.Argument(help="Câu hỏi, đặt trong ngoặc kép.")],
+    chi_tu_khoa: Annotated[bool, typer.Option("--chi-tu-khoa", help="Không gọi API.")] = False,
+    khong_viet_lai: Annotated[
+        bool, typer.Option("--khong-viet-lai", help="Không dùng LLM viết lại câu hỏi.")
+    ] = False,
+):
+    """Thử một câu: in hành vi ứng viên (Điều xử phạt), định nghĩa và quy phạm liên quan."""
+    from qltt import ngu_canh, tim_kiem, viet_lai
+
+    c = lay_cau_hinh()
+    with ket_noi_db() as conn:
+        vec, them = None, []
+        if not chi_tu_khoa:
+            client = client_embed(c)
+            cau = [cau_hoi]
+            if not khong_viet_lai:
+                with loi_openai(c.llm_model):
+                    cau += viet_lai.viet_lai(conn, client, c.llm_model, cau_hoi).cau
+            with loi_openai(c.embed_model):
+                vecs, _ = tim_kiem.vector_cau_hoi(conn, client, c.embed_model, cau)
+            conn.commit()
+            vec, them = vecs[0], list(zip(cau[1:], vecs[1:], strict=True))
+        nc = ngu_canh.lap(conn, cau_hoi, vec, them)
+
+    def ngan(s: str, n: int = 110) -> str:
+        s = " ".join(s.split())
+        return s if len(s) <= n else s[: n - 1] + "…"
+
+    if them:
+        typer.echo("VIẾT LẠI (LLM)")
+        for q, _ in them:
+            typer.echo(f"  - {q}")
+        typer.echo("")
+    typer.echo("HÀNH VI ỨNG VIÊN (Điều xử phạt)")
+    for i, h in enumerate(nc.hanh_vi, 1):
+        typer.echo(f"{i:>2}. {h.so_hieu} {h.dieu}. {ngan(h.ten, 90)}")
+        typer.echo(f"     khớp: {', '.join(h.chunk_khop[:4])}")
+    typer.echo("\nĐỊNH NGHĨA trong các văn bản trên")
+    for d in nc.dinh_nghia:
+        typer.echo(f"  - {d.so_hieu} {d.duong_dan}: {ngan(d.noi_dung)}")
+    typer.echo("\nQUY PHẠM liên quan")
+    for d in nc.quy_pham:
+        typer.echo(f"  - {d.so_hieu} {d.duong_dan}: {ngan(d.noi_dung)}")
+
+
 @eval_app.command("kiem-tra")
 def eval_kiem_tra(
     file: Annotated[Path, typer.Option(help="File case.")] = Path("eval/cases.jsonl"),
@@ -400,6 +469,193 @@ def eval_kiem_tra(
     )
     if so_loi:
         raise typer.Exit(1)
+
+
+@eval_app.command("tim-kiem")
+def eval_tim_kiem(
+    file: Annotated[Path, typer.Option(help="File case.")] = Path("eval/cases.jsonl"),
+    chi_tu_khoa: Annotated[bool, typer.Option("--chi-tu-khoa", help="Không gọi API.")] = False,
+    tat_ca: Annotated[
+        bool, typer.Option("--tat-ca", help="Tìm cả chunk quy phạm, không chỉ chunk xử phạt.")
+    ] = False,
+    co_viet_lai: Annotated[
+        bool,
+        typer.Option(
+            "--viet-lai", help="Thêm nhánh viet_lai: LLM viết lại câu hỏi (lần đầu ~0,03 USD)."
+        ),
+    ] = False,
+):
+    """Đo recall@5/8/20 và MRR của tìm kiếm trên bộ đánh giá; in câu trượt của nhóm dev.
+
+    Nhóm giữ lại (giu_lai) chỉ in điểm tổng: không đọc từng câu để chỉnh tìm kiếm theo nó.
+    """
+    import json
+    from datetime import datetime
+
+    from qltt import danh_gia, tim_kiem, viet_lai
+
+    c = lay_cau_hinh()
+    if co_viet_lai and chi_tu_khoa:
+        raise dung("--viet-lai cần gọi API, không dùng cùng --chi-tu-khoa.")
+    try:
+        cases = [x for x in danh_gia.doc_cases(file) if x.nhom == "chinh"]
+    except (FileNotFoundError, ValueError) as e:
+        raise dung(f"Không đọc được {file}: {e}") from None
+    kieu = {"doi_thuong": "cau_hoi", "nguyen_van": "cau_hoi_nguyen_van"}
+    with ket_noi_db() as conn:
+        dap_an = [danh_gia.giai(conn, x) for x in cases]
+        if loi := [d for d in dap_an if d.loi]:
+            raise dung(f"{len(loi)} case có căn cứ lỗi. Chạy `qltt eval kiem-tra` trước.")
+        vt = {
+            r[0]: (r[1], r[2], r[3] or "", r[4])
+            for r in conn.execute("SELECT id, tvpl_id, dieu_so, dieu_suffix, khoan_so FROM chunk")
+        }
+        vec = {k: [None] * len(cases) for k in kieu}
+        if not chi_tu_khoa:
+            client = client_embed(c)
+            with loi_openai(c.embed_model):
+                for k, truong in kieu.items():
+                    cau = [getattr(x, truong) for x in cases]
+                    vec[k], token = tim_kiem.vector_cau_hoi(conn, client, c.embed_model, cau)
+                    if token:
+                        typer.echo(f"Embed {len(cau)} câu {k}: {token} token")
+            conn.commit()
+
+        ket_qua = []  # (kieu, nhanh, case, đáp án, danh sách id)
+        typer.echo(f"Tìm {2 * len(cases)} câu (câu gốc)...")
+        for k, truong in kieu.items():
+            for x, da, v in zip(cases, dap_an, vec[k], strict=True):
+                loc = tim_kiem.Loc(vai_tro=None) if tat_ca else tim_kiem.XU_PHAT
+                tim = tim_kiem.tim(conn, getattr(x, truong), v, loc)
+                for nhanh, ids in tim.items():
+                    ket_qua.append((k, nhanh, x, da, ids))
+
+        viet = {}  # (kiểu, id) → các câu viết lại
+        if co_viet_lai:
+            client = client_embed(c)
+            vao = ra_ = goi = 0
+            typer.echo(f"Viết lại {2 * len(cases)} câu bằng {c.llm_model}...")
+            with loi_openai(c.llm_model):
+                for k, truong in kieu.items():
+                    for j, x in enumerate(cases, 1):
+                        if j % 10 == 0:
+                            typer.echo(f"  {k}: {j}/{len(cases)}")
+                        kq = viet_lai.viet_lai(conn, client, c.llm_model, getattr(x, truong))
+                        viet[(k, x.id)] = kq.cau
+                        vao, ra_, goi = (
+                            vao + kq.token_vao,
+                            ra_ + kq.token_ra,
+                            goi + (not kq.tu_cache),
+                        )
+            conn.commit()
+            moi = list(dict.fromkeys(q for ds in viet.values() for q in ds))
+            with loi_openai(c.embed_model):
+                vmoi, _ = tim_kiem.vector_cau_hoi(conn, client, c.embed_model, moi)
+            conn.commit()
+            vq = dict(zip(moi, vmoi, strict=True))
+            phi = vao / 1e6 * c.llm_gia_1m_vao + ra_ / 1e6 * c.llm_gia_1m_ra
+            typer.echo(
+                f"Viết lại bằng {c.llm_model}: {goi} lần gọi mới, {vao:,} + {ra_:,} token,"
+                f" ~{phi:.3f} USD; {sum(not v for v in viet.values())} câu LLM không trả được"
+            )
+            loc = tim_kiem.Loc(vai_tro=None) if tat_ca else tim_kiem.XU_PHAT
+            typer.echo("Tìm lại bằng câu gốc + câu viết lại...")
+            for k, truong in kieu.items():
+                for j, (x, da, v) in enumerate(zip(cases, dap_an, vec[k], strict=True), 1):
+                    if j % 10 == 0:
+                        typer.echo(f"  {k}: {j}/{len(cases)}")
+                    them = viet[(k, x.id)]
+                    ids = tim_kiem.tim_nhieu(
+                        conn, [getattr(x, truong), *them], [v, *(vq[q] for q in them)], loc
+                    )
+                    ket_qua.append((k, "viet_lai", x, da, ids))
+
+        def hang(r):
+            return danh_gia.hang([vt[i] for i in r[4]], r[3])
+
+        nhom = {
+            "dev": lambda x: not x.giu_lai,
+            "giữ lại": lambda x: x.giu_lai,
+            "tất cả": lambda x: True,
+        }
+        chinh = "viet_lai" if co_viet_lai else "lai"
+        dong = [(nh, k, n) for nh in dict.fromkeys(("lai", chinh)) for k in kieu for n in nhom]
+        dong += [(nh, k, "dev") for nh in ("vector", "tu_khoa") if nh != "vector" or not chi_tu_khoa
+                 for k in kieu]  # fmt: skip
+        typer.echo(
+            f"\nModel: {'(không)' if chi_tu_khoa else c.embed_model}; "
+            f"tìm trong: {'mọi chunk' if tat_ca else 'chunk xử phạt'}"
+        )
+        typer.echo(
+            "chunk@k: đáp án trong k chunk đầu; Điều@k: Điều đáp án trong k hành vi ứng viên đầu"
+        )
+        typer.echo(
+            f"{'nhánh / câu hỏi / nhóm':<32}{'n':>4}{'@5':>7}{'@8':>7}{'@20':>7}{'MRR':>7}"
+            f"{'Điều@3':>8}{'Điều@5':>8}{'trúng@20':>10}"
+        )
+        for nhanh, k, ten_nhom in dong:
+            hs = [hang(r) for r in ket_qua if r[0] == k and r[1] == nhanh and nhom[ten_nhom](r[2])]
+            m = danh_gia.tong_hop(hs)
+            hd = [
+                danh_gia.hang_dieu(danh_gia.gom_dieu([vt[i] for i in r[4]]), r[3])
+                for r in ket_qua
+                if r[0] == k and r[1] == nhanh and nhom[ten_nhom](r[2])
+            ]
+            md = danh_gia.tong_hop(hd, (3, 5))
+            trung = sum(1 for h in hs if h and h <= 20)
+            typer.echo(
+                f"{nhanh + ' / ' + k + ' / ' + ten_nhom:<32}{len(hs):>4}"
+                + "".join(f"{m[f'recall@{n}']:>7.2f}" for n in (5, 8, 20))
+                + f"{m['mrr']:>7.2f}"
+                + "".join(f"{md[f'recall@{n}']:>8.2f}" for n in (3, 5))
+                + f"{f'{trung}/{len(hs)}':>10}"
+            )
+
+        theo_nhanh = {(r[0], r[1], r[2].id): r for r in ket_qua}
+        for k in kieu:
+            truot = [
+                r
+                for r in ket_qua
+                if r[0] == k and r[1] == chinh and not r[2].giu_lai and (hang(r) or 99) > 20
+            ]
+            typer.echo(f"\nTrượt top 20 ({chinh} / {k} / dev): {len(truot)}")
+            for r in truot:
+                x = r[2]
+                top3 = tim_kiem.chi_tiet(conn, r[4][:3])
+                hv, ht = (hang(theo_nhanh[(k, nh, x.id)]) for nh in ("vector", "tu_khoa"))
+                typer.echo(f'  {x.id}  "{getattr(x, kieu[k])}"')
+                for q in viet.get((k, x.id), []):
+                    typer.echo(f"     viết lại: {q}")
+                can_cu = "; ".join(
+                    f"{cc.van_ban} Điều {cc.dieu}"
+                    + (f" khoản {', '.join(map(str, cc.khoan))}" if cc.khoan else "")
+                    for cc in x.can_cu
+                )
+                typer.echo(
+                    f"     đáp án: {can_cu} | hạng lai {hang(r) or '>50'},"
+                    f" vector {hv or '>50'}, từ khóa {ht or '>50'}"
+                )
+                typer.echo("     top 3:  " + " | ".join(f"{d.so_hieu} {d.duong_dan}" for d in top3))
+
+    thu_muc = Path("data/eval")
+    thu_muc.mkdir(parents=True, exist_ok=True)
+    ra = thu_muc / f"tim_kiem_{datetime.now():%Y%m%d_%H%M%S}.jsonl"
+    with ra.open("w", encoding="utf-8") as f:
+        for k, nhanh, x, da, ids in ket_qua:
+            f.write(
+                json.dumps(
+                    {
+                        "id": x.id,
+                        "kieu": k,
+                        "nhanh": nhanh,
+                        "hang": hang((k, nhanh, x, da, ids)),
+                        "top20": ids[:20],
+                    },
+                    ensure_ascii=False,
+                )  # fmt: skip
+                + "\n"
+            )
+    typer.echo(f"\nChi tiết: {ra}")
 
 
 def main() -> None:

@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS chunk (
     noi_dung       text    NOT NULL,
     noi_dung_embed text,                         -- noi_dung kèm prefix ngữ cảnh
     embed_hash     text,                         -- khóa tra embed_cache
-    embedding      vector(1536),                 -- text-embedding-3-small
+    embedding      vector,                       -- số chiều theo EMBED_MODEL (bge-m3: 1024)
     tsv            tsvector,
     embed          boolean NOT NULL DEFAULT true -- false: thẩm quyền, hiệu lực (không tìm kiếm)
 );
@@ -196,6 +196,15 @@ CREATE INDEX IF NOT EXISTS chat_log_luc ON chat_log (luc);
 CREATE TABLE IF NOT EXISTS embed_cache (
     hash      text PRIMARY KEY,
     model     text NOT NULL,
-    embedding vector(1536) NOT NULL,
+    embedding vector NOT NULL,  -- nhiều model, nhiều số chiều
     tao_luc   timestamptz NOT NULL DEFAULT now()
+);
+
+-- Cache câu trả lời LLM theo (model, phiên bản prompt, đầu vào): eval chạy lại không tốn tiền,
+-- kết quả lặp lại được. Không có khóa ngoại.
+CREATE TABLE IF NOT EXISTS llm_cache (
+    hash   text PRIMARY KEY,
+    model  text NOT NULL,
+    dau_ra jsonb NOT NULL,
+    tao_luc timestamptz NOT NULL DEFAULT now()
 );

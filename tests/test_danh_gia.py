@@ -123,3 +123,11 @@ def test_bo_eval_trong_repo_doc_duoc():
     cases = doc_cases(Path(__file__).parent.parent / "eval" / "cases.jsonl")
     assert len(cases) >= 40
     assert danh_gia.NHOM >= {c.nhom for c in cases}
+
+
+def test_gom_dieu_va_hang_dieu():
+    kq = [(1, 5, "", 2), (1, 2, "", 1), (1, 5, "", None), (1, None, "", None), (1, 2, "a", 1)]
+    assert danh_gia.gom_dieu(kq) == [(1, 5, ""), (1, 2, ""), (1, 2, "a")]
+    da = dap_an("khoan", (1, 2, "", 3))  # Điều 2 khoản 3: theo Điều thì khoản nào cũng tính
+    assert danh_gia.hang_dieu(danh_gia.gom_dieu(kq), da) == 2
+    assert danh_gia.hang_dieu([(1, 5, "")], da) is None

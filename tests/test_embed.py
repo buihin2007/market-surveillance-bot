@@ -64,13 +64,16 @@ def test_dung_lai_cache_sau_khi_nap_lai(csdl, tmp_path):
     assert kq.tu_cache == kq.can > 0 and kq.so_lan_goi == 0
 
 
-def test_doi_model_thi_embed_lai(csdl, tmp_path):
+def test_doi_model_thi_embed_lai_doi_nguoc_lay_tu_cache(csdl):
     api = ApiGia()
-    embed.embed_tat_ca(csdl, api, "model-a")
-    csdl.execute("UPDATE chunk SET embedding = NULL")
+    a = embed.embed_tat_ca(csdl, api, "model-a")
 
-    kq = embed.embed_tat_ca(csdl, api, "model-b")
-    assert kq.tu_cache == 0 and kq.tu_api == kq.can
+    b = embed.embed_tat_ca(csdl, api, "model-b")  # chỉ đổi tên model trong .env
+    assert b.can == a.can > 0 and b.tu_api == b.can and b.tu_cache == 0
+
+    lai_a = embed.embed_tat_ca(csdl, api, "model-a")  # đổi ngược: lấy cache, không gọi API
+    assert lai_a.tu_cache == lai_a.can == a.can and lai_a.so_lan_goi == 0
+    assert embed.embed_tat_ca(csdl, api, "model-a").can == 0
 
 
 def test_chia_lo(monkeypatch):
@@ -85,3 +88,12 @@ def test_api_tra_thieu_vector_thi_bao_loi():
     api.create = lambda **kw: NS(data=[], usage=None)
     with pytest.raises(ValueError, match="cần 1 vector"):
         embed.goi_api(api, "m", ["a"])
+
+
+def test_api_tra_vector_lech_so_chieu_thi_bao_loi():
+    api = ApiGia()
+    api.create = lambda **kw: NS(
+        data=[NS(index=0, embedding=[1.0, 2.0]), NS(index=1, embedding=[1.0])], usage=None
+    )
+    with pytest.raises(ValueError, match="cùng số chiều"):
+        embed.goi_api(api, "m", ["a", "b"])

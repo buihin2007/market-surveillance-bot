@@ -170,6 +170,17 @@ def hang(ket_qua: list[ViTri], da: DapAn) -> int | None:
     return next((i for i, c in enumerate(ket_qua, 1) if trung(c, da)), None)
 
 
+def hang_dieu(cac_dieu: list[tuple[int, int, str]], da: DapAn) -> int | None:
+    """Hạng (từ 1) của Điều đáp án trong danh sách hành vi ứng viên (Điều đã gom, không trùng)."""
+    dieu_dap_an = {(m, s, h) for m, s, h, _ in da.vi_tri}
+    return next((i for i, d in enumerate(cac_dieu, 1) if d in dieu_dap_an), None)
+
+
+def gom_dieu(ket_qua: list[ViTri]) -> list[tuple[int, int, str]]:
+    """Chunk đã xếp hạng → các Điều không trùng, theo thứ tự xuất hiện; bỏ chunk phụ lục."""
+    return list(dict.fromkeys((m, s, h) for m, s, h, _ in ket_qua if s is not None))
+
+
 def tong_hop(cac_hang: list[int | None], ks: tuple[int, ...] = (5, 8, 20)) -> dict[str, float]:
     n = len(cac_hang)
     if n == 0:

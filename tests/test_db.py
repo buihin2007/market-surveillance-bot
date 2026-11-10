@@ -80,3 +80,15 @@ def test_xoa_dan_xuat_don_bang_phien_ban_cu(conn):
 
     con = conn.execute("SELECT to_regclass('phien_ban')").fetchone()[0]
     assert con is None
+
+
+def test_khoi_tao_bo_rang_buoc_so_chieu_cua_db_cu(conn):
+    """DB tạo trước 10/11/2026 có vector(1536); khoi_tao phải cho nhận vector số chiều khác."""
+    db.khoi_tao(conn)
+    conn.execute("DELETE FROM embed_cache")
+    conn.execute("ALTER TABLE embed_cache ALTER COLUMN embedding TYPE vector(3)")
+
+    db.khoi_tao(conn)
+
+    conn.execute("INSERT INTO embed_cache (hash, model, embedding) VALUES ('a', 'm', '[1,2]')")
+    conn.execute("INSERT INTO embed_cache (hash, model, embedding) VALUES ('b', 'm', '[1,2,3,4]')")

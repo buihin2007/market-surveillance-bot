@@ -29,8 +29,15 @@ class CauHinh(BaseSettings):
     # LLM + embedding qua API kiểu OpenAI (mặc định OpenRouter). Đổi model chỉ cần sửa .env.
     llm_api_key: SecretStr = SecretStr("")
     llm_base_url: str = "https://openrouter.ai/api/v1"
-    embed_model: str = "openai/text-embedding-3-small"  # đổi model này = phải embed lại toàn kho
-    embed_gia_1m_token: float = 0.02  # USD, chỉ để in ước tính chi phí
+    # Đổi model: sửa .env rồi chạy `qltt embed`; vector model cũ còn trong cache nên đổi ngược
+    # không tốn tiền.
+    # 10/11/2026: bge-m3 recall@20 câu đời thường 0,77 so với 0,46 của text-embedding-3-small.
+    embed_model: str = "baai/bge-m3"
+    embed_gia_1m_token: float = 0.01  # USD, chỉ để in ước tính chi phí
+    # LLM (viết lại câu hỏi; GĐ 2: trả lời). Rẻ, nhanh, đọc tiếng Việt tốt.
+    llm_model: str = "google/gemini-3.1-flash-lite"
+    llm_gia_1m_vao: float = 0.25  # USD / 1 triệu token đầu vào, chỉ để in ước tính
+    llm_gia_1m_ra: float = 1.50
 
 
 @lru_cache

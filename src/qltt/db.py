@@ -21,7 +21,7 @@ BANG_DA_BO = ("phien_ban",)  # bỏ 10/11/2026: văn bản không đổi, file �
 # Không dựng lại được: không bao giờ xóa tự động, phải nằm trong backup.
 BANG_GOC = ("nhat_ky_dong_bo", "xac_nhan", "chat_log")
 # Dựng lại được nhưng tốn tiền API: giữ qua các lần rebuild.
-BANG_CACHE = ("embed_cache",)
+BANG_CACHE = ("embed_cache", "llm_cache")
 
 EXTENSION = ("vector", "unaccent", "pg_trgm")
 
@@ -55,6 +55,18 @@ def khoi_tao(conn: psycopg.Connection, xoa_dan_xuat: bool = False) -> None:
             ten = sql.SQL(", ").join(sql.Identifier(b) for b in bang)
             conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(ten))
         conn.execute(schema_sql())
+        # DB tạo trước 10/11/2026 có vector(1536): bỏ ràng buộc số chiều để đổi model được.
+        # Chỉ ALTER khi còn ràng buộc (atttypmod <> -1), vì ALTER viết lại cả bảng.
+        con_rang_buoc = conn.execute(
+            "SELECT attrelid::regclass::text FROM pg_attribute WHERE attname = 'embedding'"
+            " AND attrelid IN ('chunk'::regclass, 'embed_cache'::regclass) AND atttypmod <> -1"
+        ).fetchall()
+        for (bang,) in con_rang_buoc:
+            conn.execute(
+                sql.SQL("ALTER TABLE {} ALTER COLUMN embedding TYPE vector").format(
+                    sql.Identifier(bang)
+                )
+            )
 
 
 def thong_tin(conn: psycopg.Connection) -> dict:
