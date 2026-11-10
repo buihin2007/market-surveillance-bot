@@ -1,0 +1,21 @@
+# Chạy: docker compose up -d db
+# GĐ 5 sẽ thêm service bot vào file này.
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: qltt
+      POSTGRES_DB: qltt
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Chua dat POSTGRES_PASSWORD trong file .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qltt -d qltt"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Không mở cổng ở đây: trên VPS chỉ container bot gọi được db.
+
+volumes:
+  pgdata:

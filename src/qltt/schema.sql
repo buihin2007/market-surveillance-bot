@@ -1,0 +1,195 @@
+-- Schema chatbot QLTT. Chạy bằng: uv run qltt db init (chạy lại nhiều lần không sao).
+-- Thiết kế: qltt-kien-truc-du-lieu.md mục 3.
+--
+-- Ba loại bảng (danh sách ở src/qltt/db.py, có test kiểm):
+--   DẪN XUẤT  dựng lại được từ Sheet + Drive; lệnh rebuild được phép xóa
+--   GỐC       không dựng lại được (xác nhận của chú, lịch sử hỏi đáp); không xóa tự động, phải backup
+--   CACHE     dựng lại được nhưng tốn tiền API; giữ qua các lần rebuild
+-- Quy tắc: bảng GỐC và CACHE không có khóa ngoại trỏ tới bảng DẪN XUẤT,
+-- và không lưu id tự tăng của bảng DẪN XUẤT (id đổi sau mỗi lần rebuild).
+
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+
+-- ============================ DẪN XUẤT ============================
+
+-- 1 dòng = 1 văn bản.
+CREATE TABLE IF NOT EXISTS van_ban (
+    tvpl_id           integer PRIMARY KEY,  -- mã trong link TVPL (-{id}.aspx) và trong tên file
+    -- 7 cột chú điền trên sheet
+    so_hieu           text    NOT NULL,
+    ngay_ban_hanh     date    NOT NULL,
+    loai              text    NOT NULL CHECK (loai IN (
+                          'luat', 'phap_lenh', 'nghi_dinh', 'vbhn',
+                          'thong_tu', 'ttlt', 'quyet_dinh', 'nghi_quyet')),
+    con_hieu_luc      boolean NOT NULL,
+    ngay_hieu_luc     date,
+    ngay_het_hieu_luc date,
+    link_tvpl         text    NOT NULL,
+    -- lấy từ sheet và file
+    so_hieu_chuan     text    NOT NULL,     -- so_hieu đã chuẩn hóa ký tự, để so với dòng "Số:" trong file
+    ten               text,
+    drive_file_id     text,
+    file_hash         text,                 -- md5 của file đang dùng; đổi thì parse lại
+    -- kết quả parse lần gần nhất (file mới trượt gate thì giữ nguyên chunk cũ, chỉ ghi canh_bao)
+    parse_luc         timestamptz,
+    so_dieu           integer,
+    so_chunk          integer,
+    -- bot tính lại mỗi lần đồng bộ và ở job 00:05
+    trang_thai        text    NOT NULL DEFAULT 'loi' CHECK (trang_thai IN (
+                          'chua_hieu_luc', 'hieu_luc', 'het_hieu_luc', 'loi')),
+    dung_de_tra       boolean NOT NULL DEFAULT false,
+    vai_tro           text    CHECK (vai_tro IN ('xu_phat', 'quy_pham', 'ca_hai')),
+    qltt_lien_quan    boolean NOT NULL DEFAULT false,
+    mucphat_cua       text    CHECK (mucphat_cua IN ('ca_nhan', 'to_chuc')),
+    mucphat_ngoai_le  jsonb   NOT NULL DEFAULT '[]',
+    canh_bao          jsonb   NOT NULL DEFAULT '[]',
+    dong_bo_luc       timestamptz,
+    -- số hiệu VBHN lặp lại theo năm (03/VBHN-BCT có bản 2022 và 2025) nên phải kèm ngày
+    UNIQUE (so_hieu_chuan, ngay_ban_hanh)
+);
+
+-- Đơn vị tìm kiếm, 2 cấp: Điều (toàn văn) và khoản.
+-- File đổi: xóa chunk cũ và ghi chunk mới trong một transaction (không giữ phiên bản cũ).
+CREATE TABLE IF NOT EXISTS chunk (
+    id             bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tvpl_id        integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    cap            text    NOT NULL CHECK (cap IN ('dieu', 'khoan')),
+    dieu_so        integer NOT NULL,
+    dieu_suffix    text    NOT NULL DEFAULT '',  -- "a" trong Điều 4a
+    khoan_so       integer,                      -- trống nếu cap = 'dieu'
+    khoan_suffix   text    NOT NULL DEFAULT '',  -- "a" trong khoản 2a
+    cha_id         bigint  REFERENCES chunk ON DELETE CASCADE,  -- chunk Điều chứa khoản này
+    duong_dan      text    NOT NULL,             -- "Điều 17 khoản 1"
+    chuong_ten     text,
+    muc_ten        text,
+    dieu_ten       text,
+    loai_chunk     text    NOT NULL CHECK (loai_chunk IN (
+                       'hanh_vi', 'xu_phat_bo_sung', 'khac_phuc', 'giai_thich',
+                       'quy_dinh_chung', 'tham_quyen', 'hieu_luc', 'khac')),
+    vai_tro        text    NOT NULL CHECK (vai_tro IN ('xu_phat', 'quy_pham')),
+    noi_dung       text    NOT NULL,
+    noi_dung_embed text,                         -- noi_dung kèm prefix ngữ cảnh
+    embed_hash     text,                         -- khóa tra embed_cache
+    embedding      vector(1536),                 -- text-embedding-3-small
+    tsv            tsvector,
+    embed          boolean NOT NULL DEFAULT true -- false: thẩm quyền, hiệu lực (không tìm kiếm)
+);
+CREATE INDEX IF NOT EXISTS chunk_vi_tri ON chunk (tvpl_id, dieu_so, dieu_suffix, khoan_so, khoan_suffix);
+CREATE INDEX IF NOT EXISTS chunk_cha ON chunk (cha_id);
+CREATE INDEX IF NOT EXISTS chunk_tsv ON chunk USING gin (tsv);
+-- Chưa tạo index vector (HNSW): kho dưới 100 nghìn chunk, quét chính xác trước,
+-- đo thời gian ở GĐ 1 rồi mới quyết.
+
+-- Một dòng = một chỗ văn bản vb_sua sửa vào văn bản khác. (GĐ 3, có thể chỉnh khi viết phần trích.)
+CREATE TABLE IF NOT EXISTS sua_doi (
+    id                bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    vb_sua            integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    chunk_sua_id      bigint  REFERENCES chunk ON DELETE CASCADE,    -- chunk chứa nội dung mới
+    vb_dich_so_hieu   text    NOT NULL,                              -- số hiệu văn bản bị sửa, như ghi trong vb_sua
+    vb_dich           integer REFERENCES van_ban ON DELETE SET NULL, -- trống nếu văn bản bị sửa chưa có trong kho
+    dich_dieu         integer,
+    dich_dieu_suffix  text    NOT NULL DEFAULT '',
+    dich_khoan        integer,
+    dich_khoan_suffix text    NOT NULL DEFAULT '',
+    dich_diem         text,
+    dich_chunk_id     bigint  REFERENCES chunk ON DELETE SET NULL,   -- trống nếu chưa tìm được đích
+    loai              text    NOT NULL CHECK (loai IN ('sua_doi', 'bo_sung', 'bai_bo', 'thay_cum_tu')),
+    ngay_hieu_luc     date,
+    nguon_trich       text    NOT NULL CHECK (nguon_trich IN ('regex', 'llm')),
+    da_xac_nhan       boolean NOT NULL DEFAULT false                 -- chép từ xac_nhan mỗi lần đồng bộ
+);
+CREATE INDEX IF NOT EXISTS sua_doi_dich ON sua_doi (vb_dich, dich_dieu, dich_dieu_suffix);
+CREATE INDEX IF NOT EXISTS sua_doi_dich_chunk ON sua_doi (dich_chunk_id);
+
+-- Chú thích "[n]" trong văn bản hợp nhất: khoản nào được sửa bởi nghị định nào.
+CREATE TABLE IF NOT EXISTS chu_thich_vbhn (
+    tvpl_id      integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    so           integer NOT NULL,                           -- n trong "[n]"
+    chunk_id     bigint  REFERENCES chunk ON DELETE CASCADE, -- nơi "[n]" xuất hiện
+    noi_dung     text    NOT NULL,
+    vb_sua       text,                                       -- số hiệu văn bản sửa đổi trích được
+    PRIMARY KEY (tvpl_id, so)
+);
+
+-- Quan hệ mức văn bản, đọc là "tu <loai> den": VBHN hop_nhat nghị định gốc, nghị định mới thay_the nghị định cũ.
+CREATE TABLE IF NOT EXISTS quan_he_van_ban (
+    tu          integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    den_so_hieu text    NOT NULL,
+    den         integer REFERENCES van_ban ON DELETE SET NULL,  -- trống nếu văn bản kia chưa có trong kho
+    loai        text    NOT NULL CHECK (loai IN ('thay_the', 'sua_doi', 'bai_bo', 'hop_nhat', 'huong_dan')),
+    nguon       text    NOT NULL CHECK (nguon IN ('dieu_hieu_luc', 'dau_vbhn', 'tay')),
+    PRIMARY KEY (tu, den_so_hieu, loai)
+);
+
+-- Dẫn chiếu từ một chunk sang văn bản khác, một bước. (GĐ 3.)
+CREATE TABLE IF NOT EXISTS dan_chieu (
+    id               bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    tu_chunk_id      bigint  NOT NULL REFERENCES chunk ON DELETE CASCADE,
+    den_loai         text    NOT NULL CHECK (den_loai IN ('ten_luat', 'so_hieu', 'chu_de')),
+    den_khoa         text    NOT NULL,  -- tên luật chuẩn / số hiệu / "pháp luật về X"
+    den_tvpl_id      integer REFERENCES van_ban ON DELETE SET NULL,
+    den_dieu         integer,
+    den_dieu_suffix  text    NOT NULL DEFAULT '',
+    den_khoan        integer,
+    den_khoan_suffix text    NOT NULL DEFAULT '',
+    trang_thai       text    NOT NULL DEFAULT 'chua_anh_xa' CHECK (trang_thai IN (
+                         'ok', 'thieu_van_ban', 'thieu_dieu', 'chua_anh_xa'))
+);
+CREATE INDEX IF NOT EXISTS dan_chieu_tu ON dan_chieu (tu_chunk_id);
+
+
+-- ============================== GỐC ==============================
+
+-- Mỗi lần /dong-bo một dòng.
+CREATE TABLE IF NOT EXISTS nhat_ky_dong_bo (
+    id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    bat_dau  timestamptz NOT NULL DEFAULT now(),
+    ket_thuc timestamptz,
+    nguoi    bigint,  -- Telegram chat_id; trống = chạy từ dòng lệnh
+    tom_tat  jsonb,
+    bao_cao  text
+);
+
+-- Điều bot hỏi chú và câu trả lời của chú. Dựng lại DB xong thì áp lại, không hỏi lần hai.
+CREATE TABLE IF NOT EXISTS xac_nhan (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    loai          text   NOT NULL CHECK (loai IN ('go_tim_kiem', 'mucphat_cua', 'sua_doi_llm')),
+    khoa          text   NOT NULL,  -- khóa tự nhiên, ví dụ "tvpl:406627"
+    noi_dung      jsonb  NOT NULL,  -- điều được hỏi; nội dung đổi thì hỏi lại
+    noi_dung_hash text   NOT NULL,
+    quyet_dinh    text   CHECK (quyet_dinh IN ('dong_y', 'tu_choi')),  -- trống = đang chờ chú bấm
+    tao_luc       timestamptz NOT NULL DEFAULT now(),
+    tra_loi_luc   timestamptz,
+    nguoi         bigint,
+    UNIQUE (loai, khoa, noi_dung_hash)
+);
+
+-- Mỗi câu hỏi một dòng, kèm vết từng bước để tra khi chú bấm "Báo sai".
+CREATE TABLE IF NOT EXISTS chat_log (
+    id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    luc             timestamptz NOT NULL DEFAULT now(),
+    kenh            text   NOT NULL DEFAULT 'cli' CHECK (kenh IN ('cli', 'eval', 'telegram')),
+    nguoi           bigint,  -- Telegram chat_id
+    cau_hoi         text   NOT NULL,
+    loai_ket_qua    text,    -- tra_loi | ngoai_pham_vi | khong_tim_thay | nguyen_van | loi
+    ket_qua         jsonb,
+    vet             jsonb,   -- đầu ra, thời gian, token của từng node
+    thoi_gian_ms    integer,
+    bao_sai         boolean NOT NULL DEFAULT false,
+    bao_sai_ghi_chu text
+);
+CREATE INDEX IF NOT EXISTS chat_log_luc ON chat_log (luc);
+
+
+-- ============================= CACHE =============================
+
+-- Embedding đã trả tiền, tra theo hash của (model + noi_dung_embed).
+CREATE TABLE IF NOT EXISTS embed_cache (
+    hash      text PRIMARY KEY,
+    model     text NOT NULL,
+    embedding vector(1536) NOT NULL,
+    tao_luc   timestamptz NOT NULL DEFAULT now()
+);

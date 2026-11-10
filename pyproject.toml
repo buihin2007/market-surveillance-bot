@@ -1,0 +1,37 @@
+[project]
+name = "qltt"
+version = "0.1.0"
+description = "Chatbot tra cứu xử phạt vi phạm hành chính lĩnh vực quản lý thị trường"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client>=2.201.0",
+    "google-auth>=2.62.1",
+    "psycopg[binary]>=3.3.8",
+    "pydantic-settings>=2.16.2",
+    "typer>=0.29.0",
+]
+
+[project.scripts]
+qltt = "qltt.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+extend-exclude = ["scripts"]  # script khảo sát cũ, không thuộc gói qltt
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]

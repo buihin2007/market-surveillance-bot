@@ -1,0 +1,7 @@
+# Chỉ dùng trên máy dev. docker compose tự đọc file này cùng compose.yaml.
+# Mở cổng Postgres cho chính máy này (127.0.0.1) để chạy `uv run qltt ...` từ ngoài container.
+# Trên VPS: không copy file này, hoặc chạy `docker compose -f compose.yaml up -d`.
+services:
+  db:
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"

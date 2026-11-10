@@ -1,0 +1,13 @@
+# bí mật: không bao giờ commit
+.env
+secrets/
+
+# dữ liệu tải về, dựng lại được
+data/
+
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
