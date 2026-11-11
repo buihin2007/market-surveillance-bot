@@ -4,7 +4,10 @@ Lý do (bộ eval 10/11/2026): câu nguyên văn kiểu luật đạt recall@8 1
 chủ yếu vì câu hỏi thiếu thuật ngữ ("logo giả" ≠ "giả mạo nhãn hiệu") hoặc tên mặt hàng át hành vi.
 Tìm bằng cả câu gốc lẫn câu viết lại rồi gộp: LLM viết sai thì câu gốc vẫn còn.
 
-Prompt không dùng ví dụ nào trong bộ eval. Đổi prompt thì tăng PHIEN_BAN (khóa cache đổi theo).
+Prompt không dùng ví dụ nào trong bộ eval. Các phiên bản prompt (PROMPT): v1 chỉ quy tắc; v2 thêm
+định nghĩa (Điều "Giải thích từ ngữ" của các nghị định xử phạt); v3 thêm danh mục tên hành vi (tên
+mọi Điều xử phạt trong kho); v4 cả hai. Phần thêm lấy từ kho, không viết tay, nên không chỉnh theo
+bộ eval; kho đổi thì prompt đổi, khóa cache đổi theo.
 """
 
 import hashlib
@@ -15,8 +18,13 @@ from dataclasses import dataclass
 import psycopg
 from psycopg.types.json import Jsonb
 
-PHIEN_BAN = "v1"
 TOI_DA = 3
+PROMPT = {
+    "v1": (),
+    "v2": ("dinh_nghia",),
+    "v3": ("danh_muc",),
+    "v4": ("dinh_nghia", "danh_muc"),
+}
 
 HE_THONG = """Bạn hỗ trợ cán bộ Quản lý thị trường tra cứu nghị định xử phạt vi phạm hành chính.
 Người dùng mô tả một tình huống bằng lời thường. Viết lại thành 1 đến 3 cụm từ, mỗi cụm mô tả một \
@@ -47,6 +55,51 @@ VI_DU = [
 ]  # fmt: skip
 
 
+def dinh_nghia(conn: psycopg.Connection) -> str:
+    """Điều "Giải thích từ ngữ" của các văn bản có điều khoản xử phạt, đang dùng để tra."""
+    rows = conn.execute(
+        "SELECT v.so_hieu, c.noi_dung FROM chunk c JOIN van_ban v USING (tvpl_id)"
+        " WHERE v.dung_de_tra AND c.cap = 'dieu' AND c.loai_chunk = 'giai_thich'"
+        " AND c.tvpl_id IN (SELECT tvpl_id FROM chunk WHERE vai_tro = 'xu_phat')"
+        " ORDER BY v.tvpl_id, c.dieu_so"
+    ).fetchall()
+    return "\n\n".join(f"[{so}]\n{' '.join(nd.split())}" for so, nd in rows)
+
+
+def danh_muc(conn: psycopg.Connection) -> str:
+    """Tên mọi Điều quy định hành vi vi phạm (Điều xử phạt) trong kho, theo văn bản."""
+    rows = conn.execute(
+        "SELECT v.so_hieu, c.dieu_ten FROM chunk c JOIN van_ban v USING (tvpl_id)"
+        " WHERE v.dung_de_tra AND c.cap = 'dieu' AND c.vai_tro = 'xu_phat'"
+        " AND c.loai_chunk = 'hanh_vi' AND c.dieu_ten IS NOT NULL"
+        " ORDER BY v.tvpl_id, c.dieu_so, c.dieu_suffix"
+    ).fetchall()
+    theo_vb: dict[str, list[str]] = {}
+    for so, ten in rows:
+        theo_vb.setdefault(so, []).append(" ".join(ten.split()))
+    return "\n".join(f"- {so}: {'; '.join(dict.fromkeys(ds))}" for so, ds in theo_vb.items())
+
+
+KHOI = {
+    "dinh_nghia": (
+        "ĐỊNH NGHĨA trong các nghị định xử phạt (dùng để chọn đúng khái niệm):",
+        dinh_nghia,
+    ),
+    "danh_muc": (
+        "DANH MỤC tên các hành vi vi phạm có trong kho. Khi tình huống khớp, viết cụm hành vi"
+        " theo đúng cách gọi trong danh mục (không ghi số hiệu văn bản):",
+        danh_muc,
+    ),
+}
+
+
+def he_thong(conn: psycopg.Connection, phien_ban: str) -> str:
+    if phien_ban not in PROMPT:
+        raise ValueError(f"prompt lạ: {phien_ban!r}; có: {', '.join(PROMPT)}")
+    khoi = [f"{tieu_de}\n{lay(conn)}" for tieu_de, lay in (KHOI[k] for k in PROMPT[phien_ban])]
+    return "\n\n".join([HE_THONG, *khoi])
+
+
 @dataclass
 class KetQuaVietLai:
     cau: list[str]
@@ -55,8 +108,15 @@ class KetQuaVietLai:
     token_ra: int = 0
 
 
-def khoa(model: str, cau_hoi: str) -> str:
-    return hashlib.sha256(f"viet_lai\n{PHIEN_BAN}\n{model}\n{cau_hoi}".encode()).hexdigest()
+def khoa(model: str, cau_hoi: str, phien_ban: str = "v1", prompt: str = "") -> str:
+    # v1 giữ khóa cũ (không có prompt trong khóa); bản khác: khóa gồm băm của prompt đầy đủ,
+    # vì định nghĩa / danh mục lấy từ kho nên đổi theo kho.
+    nhan = (
+        phien_ban
+        if phien_ban == "v1"
+        else f"{phien_ban}:{hashlib.sha256(prompt.encode()).hexdigest()[:16]}"
+    )
+    return hashlib.sha256(f"viet_lai\n{nhan}\n{model}\n{cau_hoi}".encode()).hexdigest()
 
 
 def doc_json(s: str) -> list[str]:
@@ -74,12 +134,15 @@ def doc_json(s: str) -> list[str]:
     return list(dict.fromkeys(sach))[:TOI_DA]
 
 
-def viet_lai(conn: psycopg.Connection, client, model: str, cau_hoi: str) -> KetQuaVietLai:
-    h = khoa(model, cau_hoi)
+def viet_lai(
+    conn: psycopg.Connection, client, model: str, cau_hoi: str, phien_ban: str = "v1"
+) -> KetQuaVietLai:
+    ht = HE_THONG if phien_ban == "v1" else he_thong(conn, phien_ban)
+    h = khoa(model, cau_hoi, phien_ban, ht)
     co = conn.execute("SELECT dau_ra FROM llm_cache WHERE hash = %s", [h]).fetchone()
     if co:
         return KetQuaVietLai(co[0]["hanh_vi"], tu_cache=True)
-    tin = [{"role": "system", "content": HE_THONG}]
+    tin = [{"role": "system", "content": ht}]
     for hoi, dap in VI_DU:
         tin += [
             {"role": "user", "content": hoi},

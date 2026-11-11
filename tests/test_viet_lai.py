@@ -79,3 +79,32 @@ def test_vi_du_trong_prompt_khong_lay_tu_bo_eval():
     prompt = viet_lai.HE_THONG + json.dumps(viet_lai.VI_DU, ensure_ascii=False)
     for x in cases:
         assert x.cau_hoi not in prompt and x.cau_hoi_nguyen_van.lower() not in prompt.lower()
+
+
+def test_prompt_v2_v3_lay_dinh_nghia_va_danh_muc_tu_kho(conn, tmp_path):
+    from test_nap import HOM_NAY, dong, nap_docx
+    from test_ngu_canh import ND
+
+    from qltt import nap
+
+    db.khoi_tao(conn, xoa_dan_xuat=True)
+    nap_docx(conn, tmp_path, dong(406627, "98/2020/NĐ-CP"), ND)
+    nap.tinh_lai(conn, HOM_NAY)
+
+    v1, v2, v3, v4 = (viet_lai.he_thong(conn, v) for v in ("v1", "v2", "v3", "v4"))
+    assert v1 == viet_lai.HE_THONG
+    assert "Hàng giả là hàng hóa" in v2 and "DANH MỤC" not in v2
+    assert "- 98/2020/NĐ-CP: Buôn bán hàng giả; Kinh doanh hàng nhập lậu" in v3
+    assert "Hàng giả là hàng hóa" not in v3  # định nghĩa không lọt vào danh mục
+    assert v4.startswith(v1) and "Hàng giả là hàng hóa" in v4 and "DANH MỤC" in v4
+    with pytest.raises(ValueError, match="prompt lạ"):
+        viet_lai.he_thong(conn, "v9")
+
+    # khóa cache: v1 giữ như cũ; bản khác đổi khi prompt (tức kho) đổi
+    assert viet_lai.khoa("m", "q") == viet_lai.khoa("m", "q", "v1", "bất kỳ")
+    assert viet_lai.khoa("m", "q", "v3", v3) != viet_lai.khoa("m", "q", "v3", v3 + "x")
+
+    api = ChatGia('{"hanh_vi": ["buôn bán hàng giả"]}')
+    conn.execute("DELETE FROM llm_cache")
+    assert viet_lai.viet_lai(conn, api, "m", "bán đồ dỏm", "v3").cau == ["buôn bán hàng giả"]
+    assert api.goi[0]["messages"][0]["content"] == v3

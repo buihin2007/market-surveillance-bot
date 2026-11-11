@@ -1,5 +1,6 @@
 # bí mật: không bao giờ commit
 .env
+.env.example
 secrets/
 
 # dữ liệu tải về, dựng lại được

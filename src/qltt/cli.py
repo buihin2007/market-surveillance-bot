@@ -411,7 +411,9 @@ def tim_lenh(
             cau = [cau_hoi]
             if not khong_viet_lai:
                 with loi_openai(c.llm_model):
-                    cau += viet_lai.viet_lai(conn, client, c.llm_model, cau_hoi).cau
+                    cau += viet_lai.viet_lai(
+                        conn, client, c.llm_model, cau_hoi, c.viet_lai_prompt
+                    ).cau
             with loi_openai(c.embed_model):
                 vecs, _ = tim_kiem.vector_cau_hoi(conn, client, c.embed_model, cau)
             conn.commit()
@@ -481,9 +483,16 @@ def eval_tim_kiem(
     co_viet_lai: Annotated[
         bool,
         typer.Option(
-            "--viet-lai", help="Thêm nhánh viet_lai: LLM viết lại câu hỏi (lần đầu ~0,03 USD)."
+            "--viet-lai", help="Thêm nhánh viet_lai: LLM viết lại câu hỏi (lần đầu ~0,01-0,5 USD)."
         ),
     ] = False,
+    prompt: Annotated[
+        str | None,
+        typer.Option(help="Phiên bản prompt viết lại: v1|v2|v3|v4 (mặc định theo .env)."),
+    ] = None,
+    model_viet_lai: Annotated[
+        str | None, typer.Option(help="Model viết lại (mặc định LLM_MODEL trong .env).")
+    ] = None,
 ):
     """Đo recall@5/8/20 và MRR của tìm kiếm trên bộ đánh giá; in câu trượt của nhóm dev.
 
@@ -495,6 +504,10 @@ def eval_tim_kiem(
     from qltt import danh_gia, tim_kiem, viet_lai
 
     c = lay_cau_hinh()
+    model_vl = model_viet_lai or c.llm_model
+    prompt_vl = prompt or c.viet_lai_prompt
+    if prompt_vl not in viet_lai.PROMPT:
+        raise dung(f"--prompt phải là một trong: {', '.join(viet_lai.PROMPT)}")
     if co_viet_lai and chi_tu_khoa:
         raise dung("--viet-lai cần gọi API, không dùng cùng --chi-tu-khoa.")
     try:
@@ -502,6 +515,7 @@ def eval_tim_kiem(
     except (FileNotFoundError, ValueError) as e:
         raise dung(f"Không đọc được {file}: {e}") from None
     kieu = {"doi_thuong": "cau_hoi", "nguyen_van": "cau_hoi_nguyen_van"}
+    typer.echo(f"Đọc {len(cases)} case, kết nối DB...")
     with ket_noi_db() as conn:
         dap_an = [danh_gia.giai(conn, x) for x in cases]
         if loi := [d for d in dap_an if d.loi]:
@@ -512,6 +526,7 @@ def eval_tim_kiem(
         }
         vec = {k: [None] * len(cases) for k in kieu}
         if not chi_tu_khoa:
+            typer.echo(f"Vector câu hỏi ({c.embed_model}, có cache)...")
             client = client_embed(c)
             with loi_openai(c.embed_model):
                 for k, truong in kieu.items():
@@ -534,13 +549,15 @@ def eval_tim_kiem(
         if co_viet_lai:
             client = client_embed(c)
             vao = ra_ = goi = 0
-            typer.echo(f"Viết lại {2 * len(cases)} câu bằng {c.llm_model}...")
-            with loi_openai(c.llm_model):
+            typer.echo(f"Viết lại {2 * len(cases)} câu bằng {model_vl}, prompt {prompt_vl}...")
+            with loi_openai(model_vl):
                 for k, truong in kieu.items():
                     for j, x in enumerate(cases, 1):
                         if j % 10 == 0:
                             typer.echo(f"  {k}: {j}/{len(cases)}")
-                        kq = viet_lai.viet_lai(conn, client, c.llm_model, getattr(x, truong))
+                        kq = viet_lai.viet_lai(
+                            conn, client, model_vl, getattr(x, truong), prompt_vl
+                        )
                         viet[(k, x.id)] = kq.cau
                         vao, ra_, goi = (
                             vao + kq.token_vao,
@@ -555,7 +572,8 @@ def eval_tim_kiem(
             vq = dict(zip(moi, vmoi, strict=True))
             phi = vao / 1e6 * c.llm_gia_1m_vao + ra_ / 1e6 * c.llm_gia_1m_ra
             typer.echo(
-                f"Viết lại bằng {c.llm_model}: {goi} lần gọi mới, {vao:,} + {ra_:,} token,"
+                f"Viết lại bằng {model_vl} ({prompt_vl}): {goi} lần gọi mới,"
+                f" {vao:,} + {ra_:,} token,"
                 f" ~{phi:.3f} USD; {sum(not v for v in viet.values())} câu LLM không trả được"
             )
             loc = tim_kiem.Loc(vai_tro=None) if tat_ca else tim_kiem.XU_PHAT
@@ -591,7 +609,7 @@ def eval_tim_kiem(
         )
         typer.echo(
             f"{'nhánh / câu hỏi / nhóm':<32}{'n':>4}{'@5':>7}{'@8':>7}{'@20':>7}{'MRR':>7}"
-            f"{'Điều@3':>8}{'Điều@5':>8}{'trúng@20':>10}"
+            f"{'Điều@3':>8}{'Điều@5':>8}{'Điều@8':>8}{'Điều@10':>8}{'Đ@5':>7}"
         )
         for nhanh, k, ten_nhom in dong:
             hs = [hang(r) for r in ket_qua if r[0] == k and r[1] == nhanh and nhom[ten_nhom](r[2])]
@@ -601,28 +619,41 @@ def eval_tim_kiem(
                 for r in ket_qua
                 if r[0] == k and r[1] == nhanh and nhom[ten_nhom](r[2])
             ]
-            md = danh_gia.tong_hop(hd, (3, 5))
-            trung = sum(1 for h in hs if h and h <= 20)
+            md = danh_gia.tong_hop(hd, (3, 5, 8, 10))
             typer.echo(
                 f"{nhanh + ' / ' + k + ' / ' + ten_nhom:<32}{len(hs):>4}"
                 + "".join(f"{m[f'recall@{n}']:>7.2f}" for n in (5, 8, 20))
                 + f"{m['mrr']:>7.2f}"
-                + "".join(f"{md[f'recall@{n}']:>8.2f}" for n in (3, 5))
-                + f"{f'{trung}/{len(hs)}':>10}"
+                + "".join(f"{md[f'recall@{n}']:>8.2f}" for n in (3, 5, 8, 10))
+                + f"{f'{sum(1 for h in hd if h and h <= 5)}/{len(hd)}':>7}"
             )
 
         theo_nhanh = {(r[0], r[1], r[2].id): r for r in ket_qua}
+
+        def hang_d(r):
+            return danh_gia.hang_dieu(danh_gia.gom_dieu([vt[i] for i in r[4]]), r[3])
+
         for k in kieu:
             truot = [
                 r
                 for r in ket_qua
-                if r[0] == k and r[1] == chinh and not r[2].giu_lai and (hang(r) or 99) > 20
+                if r[0] == k and r[1] == chinh and not r[2].giu_lai and (hang_d(r) or 99) > 5
             ]
-            typer.echo(f"\nTrượt top 20 ({chinh} / {k} / dev): {len(truot)}")
+            typer.echo(f"\nĐiều đáp án ngoài 5 hành vi đầu ({chinh} / {k} / dev): {len(truot)}")
             for r in truot:
                 x = r[2]
-                top3 = tim_kiem.chi_tiet(conn, r[4][:3])
-                hv, ht = (hang(theo_nhanh[(k, nh, x.id)]) for nh in ("vector", "tu_khoa"))
+                dieu = danh_gia.gom_dieu([vt[i] for i in r[4]])[:3]
+                ten = {
+                    (a, b, s_): f"{so} Điều {b}{s_}"
+                    for a, b, s_, so in conn.execute(
+                        "SELECT c.tvpl_id, c.dieu_so, c.dieu_suffix, v.so_hieu FROM chunk c"
+                        " JOIN van_ban v USING (tvpl_id) WHERE c.cap = 'dieu'"
+                        " AND (c.tvpl_id, c.dieu_so) IN"
+                        " (SELECT * FROM unnest(%s::int[], %s::int[]))",
+                        [[d[0] for d in dieu], [d[1] for d in dieu]],
+                    )
+                }
+                hv, ht = (hang_d(theo_nhanh[(k, nh, x.id)]) for nh in ("vector", "tu_khoa"))
                 typer.echo(f'  {x.id}  "{getattr(x, kieu[k])}"')
                 for q in viet.get((k, x.id), []):
                     typer.echo(f"     viết lại: {q}")
@@ -632,10 +663,10 @@ def eval_tim_kiem(
                     for cc in x.can_cu
                 )
                 typer.echo(
-                    f"     đáp án: {can_cu} | hạng lai {hang(r) or '>50'},"
-                    f" vector {hv or '>50'}, từ khóa {ht or '>50'}"
+                    f"     đáp án: {can_cu} | hạng Điều {chinh} {hang_d(r) or 'không có'},"
+                    f" vector {hv or 'không có'}, từ khóa {ht or 'không có'}"
                 )
-                typer.echo("     top 3:  " + " | ".join(f"{d.so_hieu} {d.duong_dan}" for d in top3))
+                typer.echo("     3 Điều đầu: " + " | ".join(ten.get(d, str(d)) for d in dieu))
 
     thu_muc = Path("data/eval")
     thu_muc.mkdir(parents=True, exist_ok=True)
@@ -662,4 +693,12 @@ def main() -> None:
     for luong in (sys.stdout, sys.stderr):
         # Windows: in được tiếng Việt cả khi đầu ra bị chuyển hướng sang file
         luong.reconfigure(encoding="utf-8")
-    app()
+    try:
+        app()
+    except psycopg.errors.LockNotAvailable:
+        typer.echo(
+            "Postgres: chờ khóa quá 15 giây. Một phiên khác đang giữ transaction dở (lệnh qltt"
+            " cũ chưa thoát hẳn, hoặc DBeaver ở chế độ commit tay). Tắt chúng rồi chạy lại.",
+            err=True,
+        )
+        sys.exit(1)

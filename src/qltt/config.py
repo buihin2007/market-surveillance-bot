@@ -38,6 +38,8 @@ class CauHinh(BaseSettings):
     llm_model: str = "google/gemini-3.1-flash-lite"
     llm_gia_1m_vao: float = 0.25  # USD / 1 triệu token đầu vào, chỉ để in ước tính
     llm_gia_1m_ra: float = 1.50
+    # v1 | v2 (+ định nghĩa) | v3 (+ danh mục hành vi) | v4 (cả hai). Chọn v2 ngày 11/11/2026 theo eval.
+    viet_lai_prompt: str = "v2"
 
 
 @lru_cache
