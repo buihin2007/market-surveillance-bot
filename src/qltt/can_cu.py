@@ -57,12 +57,19 @@ class ChuThich:
     ten_trong_chu_thich: str  # dùng khi văn bản sửa đổi không có trong kho
 
 
-def doc_chu_thich(noi_dung: str) -> ChuThich | None:
-    # 'Đoạn “3. …” được sửa đổi, bổ sung bởi đoạn “…” theo quy định tại …': bỏ phần trích
-    s = re.sub(r"[“\"][^”\"]*[”\"]", "…", " ".join(noi_dung.split()))
-    m = R_CHU_THICH.search(s)
-    if not m or "bãi bỏ" in m.group("dt").lower():
-        return None
+# vế sau của chú thích nhiều văn bản: "… 126/2021/NĐ-CP, có hiệu lực … và điểm b khoản 11 Điều 1
+# của Nghị định số 46/2024/NĐ-CP, có hiệu lực …"
+R_VE_SAU = re.compile(
+    r"\svà\s+(?:theo quy định\s+)?(?:tại\s+)?(?P<vt>(?:điểm|khoản|Điều)\s[^;]{0,60}?)\s*(?:của\s+)?"
+    r"(?P<loai>Nghị định|Luật|Thông tư liên tịch|Thông tư|Nghị quyết|Quyết định|Pháp lệnh)"
+    r"[^\d;]{0,80}?số\s*(?P<so>\d[\w./\-]*\w)"
+    r"(?:\s+ngày\s+(?P<ngay>\d{1,2}/\d{1,2}/\d{4}|\d{1,2} tháng \d{1,2} năm \d{4}))?"
+    r"(?:\s+của\s+(?P<cq>Chính phủ|Quốc hội))?",
+    re.I,
+)
+
+
+def _chu_thich(dt: str, m: re.Match) -> ChuThich:
     from qltt.parse import chuan_so_hieu
 
     so = chuan_so_hieu(m.group("so"))
@@ -76,10 +83,21 @@ def doc_chu_thich(noi_dung: str) -> ChuThich | None:
     if m.group("cq"):
         ten += f" của {m.group('cq')}"
     vt = re.sub(r"\s+(?:của|tại)$", "", m.group("vt").strip(" ,"))
+    return ChuThich(dt, vt, so, ten)
+
+
+def doc_chu_thich(noi_dung: str) -> list[ChuThich]:
+    """Chú thích VBHN → các lần sửa (một chú thích có thể kể nhiều văn bản sửa, nối bằng "và").
+    [] khi không phải chú thích sửa đổi (bãi bỏ, căn cứ ban hành, ghi chú biểu mẫu)."""
+    # 'Đoạn “3. …” được sửa đổi, bổ sung bởi đoạn “…” theo quy định tại …': bỏ phần trích
+    s = re.sub(r"[“\"][^”\"]*[”\"]", "…", " ".join(noi_dung.split()))
+    m = R_CHU_THICH.search(s)
+    if not m or "bãi bỏ" in m.group("dt").lower():
+        return []
     dt = re.sub(r"\s+", " ", m.group("dt").lower()).replace(",bổ", ", bổ")
     if dt in ("được thay thế", "được thế", "được bỏ"):  # thay/bỏ cụm từ: ghi là sửa đổi
         dt = "được sửa đổi"
-    return ChuThich(dt, vt, so, ten)
+    return [_chu_thich(dt, m)] + [_chu_thich(dt, x) for x in R_VE_SAU.finditer(s, m.end())]
 
 
 def ngay(d) -> str:
@@ -125,6 +143,14 @@ def gop_vi_tri(ds: list[str]) -> str:
     return ", ".join(ds)
 
 
+def _ngay_sap(ten: str) -> tuple:
+    """'… số 46/2024/NĐ-CP ngày 04/05/2024 …' → (2024, 5, 4); thiếu ngày: theo năm trong số hiệu."""
+    if m := re.search(r"ngày (\d{2})/(\d{2})/(\d{4})", ten):
+        return (int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    m = re.search(r"/(\d{4})/", ten)
+    return (int(m.group(1)) if m else 9999, 0, 0)
+
+
 def chuoi_sua_doi(ds: list[SuaDoi]) -> str:
     """Gộp theo văn bản sửa đổi: 'được sửa đổi, bổ sung tại khoản 48, khoản 49 Điều 2 Nghị định …
     và được sửa đổi tại … Nghị định …'."""
@@ -159,7 +185,7 @@ def quy_dinh_tai(
     if goc:
         rows = conn.execute(
             """
-            SELECT f.noi_dung FROM chu_thich_vbhn f JOIN chunk c ON c.id = f.chunk_id
+            SELECT c.cap, f.noi_dung FROM chu_thich_vbhn f JOIN chunk c ON c.id = f.chunk_id
             WHERE f.tvpl_id = %(t)s AND c.dieu_so = %(d)s AND c.dieu_suffix = %(h)s
               AND (c.cap = 'dieu'
                    OR (c.khoan_so = %(k)s AND (f.diem IS NULL OR f.diem = ANY(%(diem)s))))
@@ -167,8 +193,10 @@ def quy_dinh_tai(
             """,
             {"t": tvpl_id, "d": dieu, "h": ht or "", "k": khoan, "diem": diem_ds},
         ).fetchall()
-        for (nd,) in rows:
-            if x := doc_chu_thich(nd):
+        for cap, nd in rows:
+            if cap == "dieu" and re.match(r"\s*Tên Điều", nd):
+                continue  # chỉ sửa tên Điều, không sửa nội dung khoản / điểm
+            for x in doc_chu_thich(nd):
                 ten = ten_day_du(conn, x.so_hieu)
                 sua.append(
                     SuaDoi(x.dong_tu, x.vi_tri, ten if ten != x.so_hieu else x.ten_trong_chu_thich)
@@ -179,6 +207,7 @@ def quy_dinh_tai(
             continue
         dt = "được bổ sung" if cb.hanh_dong == "bo_sung" else "được sửa đổi, bổ sung"
         sua.append(SuaDoi(dt, cb.vi_tri_tu, ten_day_du(conn, cb.so_hieu)))
+    sua.sort(key=lambda x: _ngay_sap(x.van_ban))  # văn bản sửa trước nêu trước
     if not goc:
         vb = ten_day_du(conn, so_hieu)
     else:

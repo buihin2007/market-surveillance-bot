@@ -37,7 +37,7 @@ MAU_CHU = (
     ],
 )  # fmt: skip
 def test_doc_chu_thich(chu, mong):
-    x = doc_chu_thich(chu)
+    (x,) = doc_chu_thich(chu)
     assert (x.dong_tu, x.vi_tri, x.ten_trong_chu_thich) == mong
 
 
@@ -50,7 +50,19 @@ def test_doc_chu_thich(chu, mong):
     ],
 )
 def test_khong_phai_sua_doi(chu):
-    assert doc_chu_thich(chu) is None
+    assert doc_chu_thich(chu) == []
+
+
+def test_chu_thich_nhieu_van_ban_sua():
+    ds = doc_chu_thich(
+        "Điểm này được sửa đổi, bổ sung theo quy định tại điểm a khoản 11 Điều 1 của Nghị định số"
+        " 126/2021/NĐ-CP, có hiệu lực kể từ ngày 01 tháng 01 năm 2022 và điểm b khoản 11 Điều 1"
+        " của Nghị định số 46/2024/NĐ-CP, có hiệu lực kể từ ngày 01 tháng 7 năm 2024."
+    )
+    assert [(x.vi_tri, x.so_hieu) for x in ds] == [
+        ("điểm a khoản 11 Điều 1", "126/2021/NĐ-CP"),
+        ("điểm b khoản 11 Điều 1", "46/2024/NĐ-CP"),
+    ]
 
 
 def test_vi_tri_va_gop():
@@ -85,17 +97,19 @@ def kho(conn, tmp_path):
         dong(3, "02/VBHN-BKHCN", loai="vbhn", ngay=date(2022, 1, 25)),
         [
             "Điều 1. Phạm vi điều chỉnh",
-            "Điều 31. Vi phạm về nhãn hàng hóa",
+            "Điều 31.[47] Vi phạm về nhãn hàng hóa",
             "1. Phạt tiền từ 500.000 đồng đến 1.000.000 đồng đối với một trong các hành vi sau:",
             "a) Không có nhãn;",
             "b)[48] Ghi nhãn sai;",
             "c)[49] Nhãn bị thay đổi.",
             "Điều 32. Hiệu lực",
             "[1] Nghị định số 126/2021/NĐ-CP có căn cứ ban hành như sau:",
+            "[47] Tên Điều này được sửa đổi, bổ sung theo quy định tại khoản 47 Điều 2 Nghị định số"
+            " 126/2021/NĐ-CP.",
             "[48] Điểm này được sửa đổi, bổ sung theo quy định tại khoản 48 Điều 2 Nghị định số"
             " 126/2021/NĐ-CP ngày 30 tháng 12 năm 2021 của Chính phủ, có hiệu lực kể từ",
-            "[49] Điểm này được sửa đổi, bổ sung theo quy định tại khoản 49 Điều 2 Nghị định số"
-            " 126/2021/NĐ-CP.",
+            "[49] Điểm này được sửa đổi, bổ sung theo quy định tại khoản 3 Điều 1 Nghị định số"
+            " 99/2099/NĐ-CP.",
         ],
         ten="vbhn.docx",
         ngay="ngày 25 tháng 01 năm 2022",
@@ -111,7 +125,7 @@ def kho(conn, tmp_path):
 
 def test_mau_cua_chu(kho):
     assert can_cu.quy_dinh_tai(kho, 3, 31, "", 1, "b") == MAU_CHU
-    # chú thích của điểm khác không dính vào
+    # chú thích của điểm khác, chú thích chỉ sửa tên Điều: không dính vào
     assert can_cu.quy_dinh_tai(kho, 3, 31, "", 1, "a") == MAU_CHU.split(" được")[0].replace(
         "điểm b", "điểm a"
     )
@@ -119,3 +133,20 @@ def test_mau_cua_chu(kho):
     assert can_cu.ten_day_du(kho, "126/2021/NĐ-CP") == (
         "Nghị định số 126/2021/NĐ-CP ngày 30/12/2021 của Chính phủ"
     )
+
+
+def test_van_ban_lien_quan_co_link_ca_van_ban_chua_co_trong_kho(kho):
+    from qltt.hien_thi import VanBan, ViTri, van_ban_lien_quan
+
+    vt = ViTri(3, 31, "", 1, "", ("b", "c"))
+    chu = [can_cu.quy_dinh_tai(kho, 3, 31, "", 1, ["b", "c"])]
+    assert "khoản 48 Điều 2 Nghị định số 126/2021/NĐ-CP" in chu[0]
+    assert chu[0].endswith("tại khoản 3 Điều 1 Nghị định số 99/2099/NĐ-CP")
+    dong = van_ban_lien_quan(kho, VanBan(kho), [vt], chu)
+    assert dong == [
+        '• <a href="x-3.aspx">NĐ 119/2017 (02/VBHN-BKHCN)</a> – bản hợp nhất, bot đang đọc',
+        '• <a href="x-1.aspx">NĐ 119/2017</a> – văn bản gốc',
+        '• <a href="x-2.aspx">NĐ 126/2021</a> – sửa đổi, bổ sung',
+        '• <a href="https://thuvienphapluat.vn/page/tim-van-ban.aspx?keyword=99/2099/N%C4%90-CP">'
+        "NĐ 99/2099</a> – sửa đổi, bổ sung (chưa có trong kho)",
+    ]

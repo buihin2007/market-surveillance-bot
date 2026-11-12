@@ -2,6 +2,8 @@
 "📋 Quy định tại" (căn cứ đầy đủ văn phong biên bản, hien_thi.quy_dinh_tai; dựng lúc trả lời, lưu
 chat_log.ket_qua['qdt']) và "⚠️ Báo sai". Nút Nguyên văn đã bỏ (12/11); callback "nv:" còn xử lý
 cho tin cũ.
+- Theo dõi (TELEGRAM_THEO_DOI, mặc định bật): câu hỏi của người khác admin → admin nhận bản sao
+  câu hỏi + câu trả lời ngay khi bot trả lời (xem lại sau: qltt nhat-ky).
 - /dongbo: đồng bộ Sheet / Drive → DB như `qltt dong-bo` (cả embed), báo cáo về chat; người chạy
   không phải admin thì báo cả admin. /vanban <số hiệu>: tình trạng văn bản trong kho (GĐ 4.3).
 
@@ -18,6 +20,7 @@ cho tin cũ.
 import asyncio
 import logging
 import traceback
+from html import escape
 
 import psycopg
 from telegram import (
@@ -332,6 +335,25 @@ class Bot:
         )
         for i, p in enumerate(phan[1:], 2):
             await msg.reply_text(p, reply_markup=ban_phim if i == len(phan) else None, **HTML)
+        await self._theo_doi(update, ctx, kq)
+
+    async def _theo_doi(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE, kq: dict) -> None:
+        """Bản sao cho admin: ai hỏi gì, bot trả lời gì (không kèm nút)."""
+        msg = update.effective_message
+        admin = self.c.telegram_admin
+        if not (getattr(self.c, "telegram_theo_doi", True) and admin) or msg.chat_id == admin:
+            return
+        u = getattr(update, "effective_user", None)
+        ten = escape(u.full_name) if u else str(msg.chat_id)
+        dau = (
+            f"👀 <b>{ten}</b> hỏi (mã #{kq['ma']}, {kq['giay']:.1f} s):\n"
+            f"<i>{escape(msg.text)}</i>\n\n"
+        )
+        try:
+            for p in chia_tin(dau + kq["html"]):
+                await ctx.bot.send_message(admin, p, **HTML)
+        except Exception:
+            log.exception("không gửi được bản sao theo dõi")
 
     async def van_ban(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         tim = " ".join(ctx.args or [])

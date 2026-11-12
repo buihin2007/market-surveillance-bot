@@ -1,20 +1,23 @@
-# Bộ đánh giá
+# Evaluation set
 
-`cases.jsonl`: mỗi dòng một tình huống. Tạo lần đầu từ Sổ tay nghiệp vụ QLTT (40 hành vi, bản 26/10/2026) + 3 câu ngoài phạm vi; từ nay sửa thẳng file này.
+`cases.jsonl`: one case per line. First built from the QLTT operations handbook (40 violations,
+26/10/2026 edition) plus 3 out-of-scope questions; edit this file directly from now on.
 
-| Trường | Ý nghĩa |
+| Field | Meaning |
 |---|---|
-| `id` | Mã hành vi trong sổ tay (QLTT-xx-yyy) hoặc PV-xxx |
-| `nhom` | `chinh`: có căn cứ. `khong_co`: kho không có quy định, bot phải nói không tìm thấy |
-| `loai` | Loại câu hỏi (GĐ 2.2), mặc định `hanh_vi`. `quy_dinh`: hỏi nội dung quy định (căn cứ là Điều quy định). `ngoai_pham_vi`: thẩm quyền, hiệu lực, hình sự, lĩnh vực khác. `khac`: chào hỏi… Hai loại cuối luôn `khong_co` |
-| `cau_hoi` | Cách chú gõ ngoài đời (bản đầu do Claude viết, cần chú sửa cho giống thật) |
-| `cau_hoi_nguyen_van` | Tên hành vi trong sổ tay, gần câu chữ luật: dễ tìm hơn, chỉ để so |
-| `can_cu` | Danh sách `{van_ban, dieu, khoan, diem}` theo văn bản gốc; VBHN tự quy đổi. `khoan` trống = cả Điều |
-| `cap_cham` | `dieu`: trúng nếu ra bất kỳ chunk nào của Điều (khoản phụ thuộc giá trị hàng). `khoan`: phải ra đúng khoản hoặc chunk cả Điều |
-| `kiem` | `so_tay` (từ sổ tay, chưa rà soát), `claude_de_xuat` (Claude tra trong kho, cần người kiểm), `nguoi_da_kiem` |
-| `giu_lai` | `true`: không nhìn khi tinh chỉnh, chỉ chạy ở lần đo cuối |
-| `khung_phat`, `bo_sung`, `khac_phuc` | Lấy từ sổ tay, chưa rà soát; dùng ở GĐ 2 để chấm câu trả lời |
+| `id` | Violation code from the handbook (QLTT-xx-yyy) or PV-xxx |
+| `nhom` | `chinh`: has a legal basis. `khong_co`: the store has no rule for it; the bot must say nothing was found |
+| `loai` | Question type, default `hanh_vi`. `quy_dinh`: asks what a rule says (basis is the regulating article). `ngoai_pham_vi`: authority, validity, criminal liability, other fields. `khac`: greetings etc. The last two are always `khong_co` |
+| `cau_hoi` | How the officer would type it (first version written by Claude, to be made realistic by the officer) |
+| `cau_hoi_nguyen_van` | Handbook name of the violation, close to the legal wording: easier to find, for comparison only |
+| `can_cu` | List of `{van_ban, dieu, khoan, diem}` against the original document; VBHN is mapped automatically. Empty `khoan` = whole article |
+| `cap_cham` | `dieu`: a hit is any chunk of the article (the clause depends on the goods value). `khoan`: must return the exact clause or the whole-article chunk |
+| `kiem` | `so_tay` (from the handbook, not reviewed), `claude_de_xuat` (found in the store by Claude, needs review), `nguoi_da_kiem` (reviewed by a person) |
+| `giu_lai` | `true`: held out; never looked at while tuning, only run in the final measurement |
+| `khung_phat`, `bo_sung`, `khac_phuc` | From the handbook, not reviewed; used to grade answers |
 
-Kiểm mọi căn cứ trỏ đúng chunk: `uv run qltt eval kiem-tra`.
+Check that every legal basis points to the right chunk: `uv run qltt eval kiem-tra`.
 
-Thêm 11/11/2026: 9 câu `quy_dinh` (QD-xxx), 4 `ngoai_pham_vi` (NP-xxx), 4 `khac` (KH-xxx), do Claude viết; PV-001, PV-003 → `ngoai_pham_vi`, PV-002 → `quy_dinh`. `eval tim-kiem` chỉ chấm câu `hanh_vi`; `eval phan-loai` chấm phân loại trên mọi câu.
+Added 11/11/2026: 9 `quy_dinh` cases (QD-xxx), 4 `ngoai_pham_vi` (NP-xxx), 4 `khac` (KH-xxx),
+written by Claude; PV-001 and PV-003 → `ngoai_pham_vi`, PV-002 → `quy_dinh`. `eval tim-kiem`
+grades only `hanh_vi` cases; `eval phan-loai` grades classification on all cases.

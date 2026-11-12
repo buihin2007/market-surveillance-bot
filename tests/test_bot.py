@@ -227,3 +227,19 @@ def test_admin_trong_khong_loi(monkeypatch):
     monkeypatch.setenv("TELEGRAM_ADMIN", "")
     monkeypatch.setenv("POSTGRES_PASSWORD", "x")
     assert CauHinh(_env_file=None).telegram_admin is None
+
+
+def test_theo_doi_gui_ban_sao_cho_admin(b, ghi_tin):
+    ctx = ctx_gia()
+    upd = NS(
+        effective_message=TinGia("bán hàng nhập lậu", chat_id=5),
+        effective_user=NS(full_name="Chú <A>"),
+    )
+    chay(b.hoi(upd, ctx))
+    gui = [c.args for c in ctx.bot.send_message.call_args_list]
+    assert gui[-1][0] == 99 and gui[-1][1].startswith("👀 <b>Chú &lt;A&gt;</b> hỏi (mã #")
+    assert "<i>bán hàng nhập lậu</i>" in gui[-1][1] and "🔹 <b>" in gui[-1][1]
+    # admin tự hỏi → không gửi bản sao
+    ctx = ctx_gia()
+    chay(b.hoi(NS(effective_message=TinGia("bán hàng nhập lậu", chat_id=99)), ctx))
+    ctx.bot.send_message.assert_not_awaited()

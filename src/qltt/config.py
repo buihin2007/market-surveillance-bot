@@ -54,6 +54,8 @@ class CauHinh(BaseSettings):
     telegram_cho_phep: str = ""
     # chat_id nhận báo lỗi và báo sai (ikm). Trống: không báo.
     telegram_admin: int | None = None
+    # Gửi admin bản sao mọi câu hỏi + câu trả lời của người khác (theo dõi thời gian thực).
+    telegram_theo_doi: bool = True
     # Telegram bị chặn ở VN: nếu máy chạy bot không tới được api.telegram.org thì đặt proxy,
     # vd http://127.0.0.1:7890 hoặc socks5://127.0.0.1:1080 (socks cần gói httpx[socks]).
     telegram_proxy: str = ""

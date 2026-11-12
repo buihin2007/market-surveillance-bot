@@ -1,0 +1,16 @@
+# Bí mật: gắn lúc chạy (compose.yaml), không bao giờ vào image
+.env
+.env.*
+secrets/
+# Dữ liệu, môi trường dev
+data/
+eval/
+docs/
+scripts/
+tests/
+.venv/
+.git/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.dump

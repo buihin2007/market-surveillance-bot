@@ -430,6 +430,48 @@ def hoi_lenh(
     typer.echo(f'Mã câu trả lời #{ma}. Sai thì: uv run qltt bao-sai them {ma} "lý do"')
 
 
+@app.command("nhat-ky")
+def nhat_ky_lenh(
+    so: Annotated[int, typer.Option(help="In bấy nhiêu câu gần nhất.")] = 20,
+    theo_doi: Annotated[
+        bool, typer.Option("--theo-doi", help="Chạy mãi, in câu hỏi mới ngay khi có (Ctrl+C dừng).")
+    ] = False,
+    tat_ca: Annotated[
+        bool, typer.Option("--tat-ca", help="Cả câu hỏi từ dòng lệnh / eval, không chỉ Telegram.")
+    ] = False,
+):
+    """Xem câu hỏi người dùng đã hỏi bot và bot trả lời gì (bảng chat_log)."""
+    import time
+
+    def in_dong(r):
+        ma, luc, nguoi, cau, loai, ms, bs, vb = r
+        gio = f"{luc.astimezone():%d/%m %H:%M}"
+        dau = f"#{ma} {gio} chat {nguoi or '-'} [{loai}] {(ms or 0) / 1000:.1f}s"
+        typer.echo(f"{dau}{'  ⚠ BÁO SAI' if bs else ''}\n  Hỏi: {cau}")
+        if vb:
+            dong = vb.strip().splitlines()
+            typer.echo(
+                "  Đáp: " + "\n        ".join(dong[:6]) + ("\n        …" if len(dong) > 6 else "")
+            )
+        typer.echo("")
+
+    sql = (
+        "SELECT id, luc, nguoi, cau_hoi, loai_ket_qua, thoi_gian_ms, bao_sai, ket_qua->>'van_ban'"
+        " FROM chat_log WHERE id > %s" + ("" if tat_ca else " AND kenh = 'telegram'")
+    )
+    with ket_noi_db() as conn:
+        rows = conn.execute(sql + " ORDER BY id DESC LIMIT %s", [0, so]).fetchall()[::-1]
+        for r in rows:
+            in_dong(r)
+        cuoi = rows[-1][0] if rows else 0
+        while theo_doi:
+            time.sleep(3)
+            conn.commit()  # bỏ snapshot cũ để thấy dòng bot vừa ghi
+            for r in conn.execute(sql + " ORDER BY id", [cuoi]).fetchall():
+                in_dong(r)
+                cuoi = r[0]
+
+
 @bao_sai_app.command("them")
 def bao_sai_them(
     ma: Annotated[int, typer.Argument(help="Mã câu trả lời (#id in sau câu trả lời).")],

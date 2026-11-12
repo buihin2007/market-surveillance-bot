@@ -11,6 +11,7 @@ Mỗi khối cách nhau một dòng trống và tự đóng thẻ, để bot.chi
 import dataclasses
 import re
 from html import escape
+from urllib.parse import quote
 
 import psycopg
 
@@ -379,43 +380,99 @@ def telegram(conn: psycopg.Connection, tl: TraLoi) -> str:
     return "\n\n".join(khoi)
 
 
-def _dong_can_cu(conn, ds: list[ViTri]) -> list[str]:
+VAI_TRO_CANH_BAO = {
+    "sua_doi": "sửa đổi (chưa hợp nhất)", "bo_sung": "bổ sung (chưa hợp nhất)",
+    "bai_bo": "bãi bỏ", "thay_cum_tu": "thay cụm từ (chưa hợp nhất)",
+    "khong_thuc_hien": "tạm dừng áp dụng",
+}  # fmt: skip
+TIM_TVPL = "https://thuvienphapluat.vn/page/tim-van-ban.aspx?keyword={}"
+R_SO_TRONG_CAN_CU = re.compile(r"\bsố (\d[\w./\-]*\w)")
+
+
+def _dong_can_cu(conn, ds: list[ViTri], chu_ra: list[str]) -> list[str]:
+    """Mỗi chỗ một khối <code>; chữ căn cứ gom vào chu_ra (để lấy các văn bản được nêu)."""
     ra = []
     for x in ds:
         chu = cc.quy_dinh_tai(conn, x.tvpl_id, x.dieu, x.ht, x.khoan, list(x.diem), x.kht)
         ra.append(f"<code>{escape(chu)}</code>")
+        chu_ra.append(chu)
     return ra
+
+
+def van_ban_lien_quan(
+    conn, vb: VanBan, ds: list[ViTri], can_cu_chu: list[str]
+) -> list[str]:  # fmt: skip
+    """Mọi văn bản liên quan tới các chỗ được trích, mỗi văn bản một dòng có link:
+    văn bản bot đọc (VBHN) → văn bản gốc → văn bản sửa đổi nêu trong căn cứ → văn bản sửa / tạm
+    dừng chưa hợp nhất (cảnh báo) → văn bản được dẫn chiếu. Thiếu trong kho: link tìm trên TVPL."""
+    ra: dict[str, str] = {}  # khóa: số hiệu / tên → dòng
+
+    def them(khoa: str, nhan: str, vai_tro: str, link: str | None = None) -> None:
+        if khoa in ra:
+            return
+        url = link or vb.link_so_hieu(khoa)
+        goi_y = "" if url else " (chưa có trong kho)"
+        ra[khoa] = f"• {a(nhan, url or TIM_TVPL.format(quote(khoa)))} – {vai_tro}{goi_y}"
+
+    for t in dict.fromkeys(x.tvpl_id for x in ds):
+        so_hieu, link = conn.execute(
+            "SELECT so_hieu, link_tvpl FROM van_ban WHERE tvpl_id = %s", [t]
+        ).fetchone()
+        nhan, _ = vb.theo_id(t)
+        la_vbhn = "VBHN" in so_hieu
+        them(so_hieu, nhan, "bản hợp nhất, bot đang đọc" if la_vbhn else "văn bản gốc", link)
+    for chu in can_cu_chu:
+        so = R_SO_TRONG_CAN_CU.findall(chu)
+        for i, x in enumerate(so):
+            them(x, ten_ngan(x), "văn bản gốc" if i == 0 else "sửa đổi, bổ sung")
+    for x in dict.fromkeys(ds):
+        for cb in sua_doi.canh_bao(conn, x.tvpl_id, x.dieu, x.ht, x.khoan):
+            them(cb.so_hieu, ten_ngan(cb.so_hieu), VAI_TRO_CANH_BAO[cb.hanh_dong])
+        rows = conn.execute(
+            """
+            SELECT DISTINCT d.den_loai, d.den_khoa, v.so_hieu, v.link_tvpl
+            FROM dan_chieu d JOIN chunk c ON c.id = d.tu_chunk_id
+            LEFT JOIN van_ban v ON v.tvpl_id = d.den_tvpl_id
+            WHERE c.tvpl_id = %s AND c.dieu_so = %s AND c.dieu_suffix = %s
+              AND (%s::int IS NULL OR c.khoan_so = %s OR c.cap = 'dieu')
+              AND d.den_loai <> 'chu_de'
+            """,
+            [x.tvpl_id, x.dieu, x.ht, x.khoan, x.khoan],
+        ).fetchall()
+        for loai, khoa, so_hieu, link in rows:
+            if khoa in dan_chieu.BO_QUA_HIEN_THI or so_hieu in dan_chieu.BO_QUA_HIEN_THI:
+                continue
+            ten = f"Luật {khoa}" if loai == "ten_luat" else ten_ngan(khoa)
+            them(so_hieu or khoa, ten, "được dẫn chiếu", link)
+    return list(ra.values())
 
 
 def quy_dinh_tai(conn: psycopg.Connection, tl: TraLoi) -> str | None:
     """Tin "📋 Quy định tại" (nút dưới câu trả lời): căn cứ đầy đủ, chạm để chép.
     None: câu trả lời không có căn cứ (không tìm thấy / ngoài phạm vi)."""
     vb = VanBan(conn)
-    khoi, dung = ["📋 <b>Quy định tại</b>"], []
+    khoi, vt_ds, chu = ["📋 <b>Quy định tại</b>"], [], []
     if tl.loai == "quy_dinh" and tl.trich:
         for i, x in enumerate(tl.trich, 1):
             d = x.doan
             vt = ViTri(d.tvpl_id, d.dieu_so, d.dieu_suffix, d.khoan_so)
-            dung.append(d.tvpl_id)
-            khoi.append(f"<b>{i}. {escape(d.dieu_ten)}</b>\n" + "\n".join(_dong_can_cu(conn, [vt])))
+            vt_ds.append(vt)
+            khoi.append(
+                f"<b>{i}. {escape(d.dieu_ten)}</b>\n" + "\n".join(_dong_can_cu(conn, [vt], chu))
+            )
     elif tl.loai == "hanh_vi" and tl.chon:
         for i, h in enumerate(tl.chon, 1):
             dong = []
             if len(tl.chon) > 1:
                 dong.append(f"<b>Hành vi {i}:</b> {escape(ten_hanh_vi(h.uv.hanh_vi))}")
             for j, mc in enumerate(chuoi_vi_tri(tl, h), 1):
-                dung += [x.tvpl_id for x in mc.vi_tri]
-                cu = _dong_can_cu(conn, mc.vi_tri) or ["Không quy định"]
+                vt_ds += mc.vi_tri
+                cu = _dong_can_cu(conn, mc.vi_tri, chu) or ["Không quy định"]
                 dong.append(f"{j}. {mc.ten}:\n" + "\n".join(cu))
             khoi.append("\n".join(dong))
     else:
         return None
-    link = []
-    for t in dict.fromkeys(dung):
-        nhan, url = vb.theo_id(t)
-        if url:
-            link.append(a(nhan, url))
-    if link:
-        khoi.append("🔗 Xem văn bản: " + ", ".join(link))
+    if lien_quan := van_ban_lien_quan(conn, vb, vt_ds, chu):
+        khoi.append("🔗 <b>Văn bản liên quan:</b>\n" + "\n".join(lien_quan))
     khoi.append("<i>Chạm vào khối căn cứ để chép.</i>")
     return "\n\n".join(khoi)
