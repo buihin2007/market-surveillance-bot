@@ -145,11 +145,15 @@ def test_hoi_nhieu_hanh_vi_va_khong_co(kho):
     assert tl.chon == [] and tl.van_ban.startswith("Không tìm thấy quy định xử phạt")
 
 
-@pytest.mark.parametrize(("loai", "dau"), [("khac", "Chú gõ"), ("ngoai_pham_vi", "Câu hỏi này")])
+@pytest.mark.parametrize(
+    ("loai", "dau"),
+    [("khac", "Câu này ngoài phạm vi của cháu.\n"), ("ngoai_pham_vi", "Câu này ngoài phạm vi")],
+)
 def test_hoi_khong_phai_hanh_vi(kho, loai, dau):
     api = Gia(loai=loai)
     tl = tra_loi.hoi(kho, api, C, "chào")
     assert tl.van_ban.startswith(dau) and api.goi_chon == [] and len(tl.buoc) == 1
+    assert "1. Tình huống vi phạm" in tl.van_ban and "/vanban 98/2020/NĐ-CP" in tl.van_ban
 
 
 def test_prompt_khong_phan_loai_thi_bao_loi(kho):

@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -57,6 +57,11 @@ class CauHinh(BaseSettings):
     # Telegram bị chặn ở VN: nếu máy chạy bot không tới được api.telegram.org thì đặt proxy,
     # vd http://127.0.0.1:7890 hoặc socks5://127.0.0.1:1080 (socks cần gói httpx[socks]).
     telegram_proxy: str = ""
+
+    @field_validator("telegram_admin", mode="before")
+    @classmethod
+    def _admin_trong(cls, v):
+        return None if isinstance(v, str) and not v.strip() else v  # "TELEGRAM_ADMIN=" → không báo
 
     @property
     def ds_cho_phep(self) -> set[int]:

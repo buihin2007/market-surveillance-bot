@@ -2,6 +2,8 @@
 "📋 Quy định tại" (căn cứ đầy đủ văn phong biên bản, hien_thi.quy_dinh_tai; dựng lúc trả lời, lưu
 chat_log.ket_qua['qdt']) và "⚠️ Báo sai". Nút Nguyên văn đã bỏ (12/11); callback "nv:" còn xử lý
 cho tin cũ.
+- /dongbo: đồng bộ Sheet / Drive → DB như `qltt dong-bo` (cả embed), báo cáo về chat; người chạy
+  không phải admin thì báo cả admin. /vanban <số hiệu>: tình trạng văn bản trong kho (GĐ 4.3).
 
 - Chỉ chat_id trong TELEGRAM_CHO_PHEP được dùng; người khác: bot im lặng, chỉ ghi log chat_id (để
   ikm lấy chat_id của chú lúc đầu).
@@ -19,6 +21,7 @@ import traceback
 
 import psycopg
 from telegram import (
+    BotCommand,
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -44,18 +47,28 @@ THOI_GIAN_TOI_DA = 90  # giây cho một câu hỏi (p90 đo được 5 s; API �
 QUA_LAU = "Tra cứu quá lâu (máy chủ AI chậm). Chú hỏi lại sau ít phút."
 CO_LOI = "Có lỗi khi tra cứu, đã báo người quản trị. Chú thử lại sau."
 
-GIOI_THIEU = """Chào chú. Chú gõ tình huống hoặc câu hỏi, ví dụ:
-• tạp hóa bày bán 30 bao thuốc lá ngoại không có hóa đơn
-• bán quần áo gắn logo Nike giả ở chợ
-• cửa hàng bán lẻ xăng dầu phải đáp ứng điều kiện gì
+GIOI_THIEU = """Chào chú. Chú gõ tình huống hoặc câu hỏi bình thường, không cần lệnh, ví dụ:
+bán bánh kẹo trị giá 7 triệu không có nhãn
+(Nêu trị giá / số lượng, cá nhân hay tổ chức, loại hàng thì bot chọn đúng mức phạt hơn.)
 
-Bot trả lời hành vi vi phạm, căn cứ, mức phạt, xử phạt bổ sung, biện pháp khắc phục; hoặc trích \
-nguyên văn quy định. Bot không trả lời thẩm quyền xử phạt, hiệu lực văn bản, trách nhiệm hình sự.
+CÁC LỆNH (gõ liền, có dấu /, hoặc bấm nút ☰ Menu cạnh ô gõ):
+/start – bắt đầu, xem lời chào này
+/help – xem lại hướng dẫn này
+/dongbo – gõ khi chú vừa sửa sheet hoặc thêm văn bản mới vào Drive: bot nạp phần thay đổi rồi \
+gửi báo cáo (vài chục giây đến vài phút). Trong lúc đồng bộ chú vẫn hỏi bot bình thường.
+/vanban <số hiệu> – xem văn bản có đang được tra không (hay tra qua văn bản hợp nhất nào), bị \
+văn bản nào sửa đổi, bổ sung, tạm dừng. Ví dụ: /vanban 98/2020/NĐ-CP (gõ ND-CP hoặc một phần \
+số hiệu như 98/2020 cũng được)
 
-Dòng 📌 là căn cứ rút gọn. Nút 📋 Quy định tại: căn cứ đầy đủ (ghi tới điểm, kèm văn bản sửa \
-đổi) để chép vào biên bản, và link văn bản trên Thư viện Pháp luật.
-Nút Báo sai dưới mỗi câu trả lời: chọn chỗ sai, ghi căn cứ đúng nếu biết. Chú báo càng nhiều bot \
-càng đúng."""
+CÁC NÚT dưới câu trả lời:
+📋 Quy định tại – căn cứ đầy đủ (ghi tới điểm, kèm văn bản sửa đổi), chạm để chép vào biên bản; \
+cuối tin có link Thư viện Pháp luật
+⚠️ Báo sai – chọn chỗ sai, rồi gõ căn cứ đúng vào ô trả lời bot mở sẵn (hoặc bấm Bỏ qua)
+
+Dòng 📌 là căn cứ rút gọn; dòng ⚠️ là cảnh báo quy định đã bị sửa đổi, bãi bỏ, tạm dừng.
+Bot không trả lời thẩm quyền xử phạt, trách nhiệm hình sự; luôn đối chiếu văn bản trước khi lập \
+biên bản."""
+TOI_DA_VAN_BAN = 10
 HTML = {"parse_mode": ParseMode.HTML, "link_preview_options": LinkPreviewOptions(is_disabled=True)}
 
 
@@ -173,6 +186,72 @@ def quy_dinh_tai(conn: psycopg.Connection, ma: int) -> str:
     return r[0] if r and r[0] else "Câu trả lời này không có căn cứ để trích."
 
 
+def tra_van_ban(conn: psycopg.Connection, tim: str) -> str:
+    """Tin HTML cho /vanban."""
+    from html import escape
+
+    from qltt import dong_bo
+
+    if not tim.strip():
+        ds = dong_bo.tinh_trang(conn)
+        tra = sum(x.ly_do == "dùng để tra" for x in ds)
+        return (
+            f"Kho có {len(ds)} văn bản, {tra} văn bản đang dùng để tra (văn bản gốc đã có VBHN thì"
+            " tra qua VBHN).\nGõ /vanban kèm số hiệu để xem chi tiết, vd: /vanban 98/2020/NĐ-CP"
+        )
+    ds = dong_bo.tinh_trang(conn, tim)
+    if not ds:
+        return (
+            f"Không có văn bản nào khớp «{escape(tim)}». Văn bản chưa có trên sheet và Drive thì"
+            " bot chưa tra được: chú thêm vào rồi gõ /dongbo."
+        )
+    khoi = []
+    for x in ds[:TOI_DA_VAN_BAN]:
+        ten = x.ten[:1] + x.ten[1:].lower()
+        dong = [
+            f'📄 <a href="{escape(x.link, quote=True)}">{escape(x.so_hieu)}</a>: '
+            f"<b>{escape(x.ly_do)}</b>",
+            escape(ten[:160]),
+        ]
+        if len(ds) <= 3:
+            dong += [f"• {escape(d)}" for d in dong_bo.van_ban_sua(conn, x.tvpl_id)]
+        khoi.append("\n".join(dong))
+    if len(ds) > TOI_DA_VAN_BAN:
+        khoi.append(f"… và {len(ds) - TOI_DA_VAN_BAN} văn bản khác. Chú gõ số hiệu cụ thể hơn.")
+    elif len(ds) > 3:
+        khoi.append("Gõ số hiệu đầy đủ để xem văn bản sửa đổi, tạm dừng.")
+    return "\n\n".join(khoi)
+
+
+def dong_bo_ngay(conn: psycopg.Connection, c, client) -> str:
+    """/dongbo: như `qltt dong-bo` (đọc sheet, Drive, nạp, tính lại, embed), trả báo cáo."""
+    from datetime import date
+
+    from qltt import dong_bo, google_io
+
+    dong = google_io.doc_sheet()
+    files = google_io.liet_ke_file()
+    ham = dong_bo.ham_embed(client, c.embed_model, c.embed_gia_1m_token)
+    kq = dong_bo.chay(
+        conn, dong, files, c.thu_muc_raw, google_io.tai_noi_dung, google_io.ngay_tu_serial,
+        date.today(), embed_fn=ham,
+    )  # fmt: skip
+    return dong_bo.bao_cao(kq)
+
+
+def loi_dong_bo(e: Exception) -> str | None:
+    """Lỗi Google dễ hiểu cho chú; None: lỗi khác (báo chung)."""
+    from googleapiclient.errors import HttpError
+
+    from qltt import google_io
+
+    if isinstance(e, google_io.LoiTieuDe):
+        return f"Dòng tiêu đề của sheet chưa đúng: {e}. Chú sửa sheet rồi gõ /dongbo lại."
+    if isinstance(e, HttpError):
+        return f"Không đọc được sheet hoặc Drive (lỗi {e.status_code}). Đã báo người quản trị."
+    return None
+
+
 def loai_ket_qua(conn: psycopg.Connection, ma: int) -> str | None:
     r = conn.execute("SELECT loai_ket_qua FROM chat_log WHERE id = %s", [ma]).fetchone()
     return r[0] if r else None
@@ -254,6 +333,33 @@ class Bot:
         for i, p in enumerate(phan[1:], 2):
             await msg.reply_text(p, reply_markup=ban_phim if i == len(phan) else None, **HTML)
 
+    async def van_ban(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        tim = " ".join(ctx.args or [])
+        chu = await asyncio.to_thread(self._chay, tra_van_ban, tim)
+        for p in chia_tin(chu):
+            await update.effective_message.reply_text(p, **HTML)
+
+    async def dong_bo(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        trang_thai = await msg.reply_text(
+            "⏳ Đang đồng bộ sheet và Drive… (vài chục giây đến vài phút)"
+        )
+        try:
+            bc = await asyncio.to_thread(
+                self._chay, lambda conn: dong_bo_ngay(conn, self.c, self.client)
+            )
+        except Exception as e:
+            log.exception("lỗi đồng bộ")
+            await trang_thai.edit_text(loi_dong_bo(e) or CO_LOI)
+            await self._bao_admin(ctx, f"❌ Lỗi /dongbo:\n{traceback.format_exc()[-3000:]}")
+            return
+        phan = chia_tin(bc)
+        await trang_thai.edit_text(phan[0])
+        for p in phan[1:]:
+            await msg.reply_text(p)
+        if msg.chat_id != self.c.telegram_admin:
+            await self._bao_admin(ctx, f"🔄 /dongbo (chat {msg.chat_id}):\n{bc}")
+
     async def nut(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         q = update.callback_query
         await q.answer()
@@ -316,6 +422,19 @@ class Bot:
             log.exception("không nhắn được admin")
 
 
+LENH = [
+    BotCommand("start", "Bắt đầu, xem lời chào"),
+    BotCommand("dongbo", "Nạp văn bản mới / đã sửa trên sheet và Drive"),
+    BotCommand("vanban", "Xem tình trạng văn bản, vd /vanban 98/2020/NĐ-CP"),
+    BotCommand("help", "Hướng dẫn: các lệnh, các nút, câu hỏi mẫu"),
+]
+
+
+async def dat_menu_lenh(app: Application) -> None:
+    """Menu lệnh (nút ☰ cạnh ô gõ) để chú khỏi phải nhớ."""
+    await app.bot.set_my_commands(LENH)
+
+
 def tao_ung_dung(c) -> Application:
     cho_phep = c.ds_cho_phep
     if not c.telegram_token.get_secret_value():
@@ -327,9 +446,11 @@ def tao_ung_dung(c) -> Application:
     xay = Application.builder().token(c.telegram_token.get_secret_value())
     if c.telegram_proxy:
         xay = xay.proxy(c.telegram_proxy).get_updates_proxy(c.telegram_proxy)
-    app = xay.build()
+    app = xay.post_init(dat_menu_lenh).build()
     duoc = filters.Chat(chat_id=cho_phep)
     app.add_handler(CommandHandler(["start", "help"], b.bat_dau, filters=duoc))
+    app.add_handler(CommandHandler("dongbo", b.dong_bo, filters=duoc, block=False))
+    app.add_handler(CommandHandler("vanban", b.van_ban, filters=duoc))
     app.add_handler(MessageHandler(duoc & filters.TEXT & ~filters.COMMAND, b.hoi))
     app.add_handler(CallbackQueryHandler(b.nut, pattern=r"^(qd|nv|bs|bk|bq):"), group=0)
     app.add_handler(MessageHandler(~duoc, b.nguoi_la), group=1)

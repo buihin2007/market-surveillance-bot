@@ -330,37 +330,16 @@ def van_ban_lenh(
     tim: Annotated[str, typer.Argument(help="Một phần số hiệu hoặc tên (bỏ trống: tất cả).")] = "",
 ):
     """Liệt kê văn bản trong kho: trạng thái, có dùng để tra không, vì sao không."""
+    from qltt import dong_bo
+
     with ket_noi_db() as conn:
-        rows = conn.execute(
-            """
-            SELECT v.so_hieu, v.trang_thai, v.dung_de_tra, v.go_khoi_sheet, left(v.ten, 70),
-                v.so_chunk,
-                (SELECT h.so_hieu FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
-                 WHERE q.den = v.tvpl_id AND q.loai = 'hop_nhat' AND h.dung_de_tra LIMIT 1),
-                (SELECT h.so_hieu FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
-                 WHERE q.den = v.tvpl_id AND q.loai IN ('thay_the', 'bai_bo')
-                   AND q.nguon IN ('dieu_hieu_luc', 'tay') AND h.trang_thai = 'hieu_luc' LIMIT 1)
-            FROM van_ban v
-            WHERE v.so_hieu ILIKE %(t)s OR v.ten ILIKE %(t)s
-            ORDER BY v.dung_de_tra DESC, v.ngay_ban_hanh DESC
-            """,
-            {"t": f"%{tim}%"},
-        ).fetchall()
-    for sh, tt, tra, go, ten, n, vbhn, thay in rows:
-        if tra:
-            ly_do = "dùng để tra"
-        elif go:
-            ly_do = "đã xóa khỏi sheet"
-        elif tt != "hieu_luc":
-            ly_do = tt
-        elif vbhn:
-            ly_do = f"tra qua {vbhn}"
-        elif thay:
-            ly_do = f"bị {thay} thay"
-        else:
-            ly_do = "đã hợp nhất vào VBHN"
-        typer.echo(f"  {sh:<24} {ly_do:<30} {n or 0:>5} đoạn  {ten or ''}")
-    typer.echo(f"{len(rows)} văn bản.")
+        ds = dong_bo.tinh_trang(conn, tim)
+        for x in ds:
+            typer.echo(f"  {x.so_hieu:<24} {x.ly_do:<30} {x.so_doan:>5} đoạn  {x.ten[:70]}")
+            if tim and len(ds) <= 5:
+                for d in dong_bo.van_ban_sua(conn, x.tvpl_id):
+                    typer.echo(f"      ↳ {d}")
+    typer.echo(f"{len(ds)} văn bản.")
 
 
 @app.command("embed")

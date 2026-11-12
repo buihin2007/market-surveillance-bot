@@ -450,16 +450,23 @@ def canh_bao_mot_lan(
     return sua_doi.dong_canh_bao(cb, trich=trich)
 
 
+PHAM_VI = """Cháu chỉ trả lời các loại câu hỏi:
+1. Tình huống vi phạm: hành vi, mức phạt, xử phạt bổ sung, biện pháp khắc phục, căn cứ.
+   Ví dụ: bán bánh kẹo trị giá 7 triệu không có nhãn
+2. Nội dung quy định, điều kiện kinh doanh (trích nguyên văn).
+   Ví dụ: cửa hàng bán lẻ xăng dầu phải đáp ứng điều kiện gì
+3. Tình trạng văn bản (còn được tra không, bị sửa đổi, tạm dừng): gõ /vanban <số hiệu>.
+   Ví dụ: /vanban 98/2020/NĐ-CP
+Chú gõ /help để xem hướng dẫn đầy đủ."""
+
+
 def dinh_dang(conn: psycopg.Connection, tl: TraLoi) -> str:
     if tl.loai == "khac":
-        return (
-            'Chú gõ tình huống vi phạm (vd "tạp hóa bán thuốc lá ngoại không có hóa đơn") để tra'
-            " hành vi và mức phạt, hoặc hỏi nội dung một quy định."
-        )
+        return f"Câu này ngoài phạm vi của cháu.\n{PHAM_VI}"
     if tl.loai == "ngoai_pham_vi":
         return (
-            "Câu hỏi này ngoài phạm vi tra cứu của bot (bot không trả lời về thẩm quyền xử phạt,"
-            " hiệu lực văn bản, trách nhiệm hình sự hay lĩnh vực ngoài quản lý thị trường)."
+            "Câu này ngoài phạm vi của cháu (cháu không trả lời về thẩm quyền xử phạt, trách nhiệm"
+            f" hình sự hay lĩnh vực ngoài quản lý thị trường).\n{PHAM_VI}"
         )
     if tl.loai == "quy_dinh":
         if not tl.trich:

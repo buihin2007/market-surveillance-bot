@@ -184,3 +184,46 @@ def test_tao_ung_dung_bat_buoc_token_va_danh_sach():
     c = NS(**vars(C), telegram_token=SecretStr("123:abc"), ds_cho_phep=set())
     with pytest.raises(ValueError, match="TELEGRAM_CHO_PHEP"):
         bot.tao_ung_dung(c)
+
+
+def test_van_ban(b, ghi_tin, kho):  # noqa: F811
+    assert "Kho có 1 văn bản, 1 văn bản đang dùng để tra" in bot.tra_van_ban(kho, " ")
+    chu = bot.tra_van_ban(kho, "98/2020")
+    assert chu.startswith('📄 <a href="x-1.aspx">98/2020/NĐ-CP</a>: <b>dùng để tra</b>')
+    assert "Quy định xử phạt vi phạm hành chính trong thương mại" in chu
+    assert "Không có văn bản nào khớp «99/2099»" in bot.tra_van_ban(kho, "99/2099")
+    assert bot.tra_van_ban(kho, "98/2020/ND-CP") == chu  # gõ không dấu cũng ra
+    msg = TinGia("/vanban 98/2020")
+    chay(b.van_ban(NS(effective_message=msg), NS(args=["98/2020"])))
+    assert msg.gui[-1][0] == chu
+
+
+def test_dong_bo_qua_bot(b, ghi_tin, monkeypatch):
+    goi = []
+    monkeypatch.setattr(
+        bot, "dong_bo_ngay", lambda conn, c, client: goi.append(1) or "Không có gì mới."
+    )
+    ctx = ctx_gia()
+    msg = TinGia("/dongbo", chat_id=5)
+    chay(b.dong_bo(NS(effective_message=msg), ctx))
+    assert goi and ghi_tin[0].sua[-1][0] == "Không có gì mới."
+    # chú chạy (không phải admin) → báo cả admin
+    assert ctx.bot.send_message.call_args.args == (99, "🔄 /dongbo (chat 5):\nKhông có gì mới.")
+
+    def hong(conn, c, client):
+        from qltt import google_io
+
+        raise google_io.LoiTieuDe("thiếu cột so_hieu")
+
+    monkeypatch.setattr(bot, "dong_bo_ngay", hong)
+    chay(b.dong_bo(NS(effective_message=TinGia("/dongbo")), ctx))
+    assert ghi_tin[-1].sua[-1][0].startswith("Dòng tiêu đề của sheet chưa đúng: thiếu cột so_hieu")
+    assert "Lỗi /dongbo" in ctx.bot.send_message.call_args.args[1]
+
+
+def test_admin_trong_khong_loi(monkeypatch):
+    from qltt.config import CauHinh
+
+    monkeypatch.setenv("TELEGRAM_ADMIN", "")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "x")
+    assert CauHinh(_env_file=None).telegram_admin is None

@@ -326,3 +326,90 @@ def ham_embed(client, model: str, gia_1m: float) -> Callable[[psycopg.Connection
         )
 
     return f
+
+
+# ---------- tình trạng văn bản (qltt van-ban, /vanban trên bot) ----------
+
+TEN_SUA = {
+    "sua_doi": "sửa đổi", "bo_sung": "bổ sung", "bai_bo": "bãi bỏ",
+    "thay_cum_tu": "thay cụm từ", "khong_thuc_hien": "tạm không thực hiện",
+}  # fmt: skip
+
+
+@dataclass
+class TinhTrang:
+    tvpl_id: int
+    so_hieu: str
+    ly_do: str  # "dùng để tra" | "tra qua 03/VBHN-BCT" | "đã xóa khỏi sheet" …
+    so_doan: int
+    ten: str
+    link: str
+
+
+def tinh_trang(conn: psycopg.Connection, tim: str = "") -> list[TinhTrang]:
+    """Văn bản khớp `tim` (một phần số hiệu hoặc tên): có dùng để tra không, vì sao."""
+    rows = conn.execute(
+        """
+        SELECT v.tvpl_id, v.so_hieu, v.trang_thai, v.dung_de_tra, v.go_khoi_sheet, v.ten,
+            v.so_chunk, v.link_tvpl,
+            (SELECT h.so_hieu FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
+             WHERE q.den = v.tvpl_id AND q.loai = 'hop_nhat' AND h.dung_de_tra LIMIT 1),
+            (SELECT h.so_hieu FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
+             WHERE q.den = v.tvpl_id AND q.loai IN ('thay_the', 'bai_bo')
+               AND q.nguon IN ('dieu_hieu_luc', 'tay') AND h.trang_thai = 'hieu_luc' LIMIT 1)
+        FROM van_ban v
+        WHERE translate(v.so_hieu, 'Đđ', 'Dd') ILIKE translate(%(t)s, 'Đđ', 'Dd')
+           OR v.ten ILIKE %(t)s
+        ORDER BY v.dung_de_tra DESC, v.ngay_ban_hanh DESC
+        """,
+        {"t": f"%{tim.strip()}%"},
+    ).fetchall()
+    ra = []
+    for tvpl_id, sh, tt, tra, go, ten, n, link, vbhn, thay in rows:
+        if tra:
+            ly_do = "dùng để tra"
+        elif go:
+            ly_do = "đã xóa khỏi sheet"
+        elif tt != "hieu_luc":
+            ly_do = {"chua_hieu_luc": "chưa có hiệu lực", "het_hieu_luc": "hết hiệu lực"}.get(
+                tt, "lỗi khi nạp"
+            )
+        elif vbhn:
+            ly_do = f"tra qua {vbhn}"
+        elif thay:
+            ly_do = f"bị {thay} thay"
+        else:
+            ly_do = "đã hợp nhất vào VBHN"
+        ra.append(TinhTrang(tvpl_id, sh, ly_do, n or 0, " ".join((ten or "").split()), link))
+    return ra
+
+
+def van_ban_sua(conn: psycopg.Connection, tvpl_id: int) -> list[str]:
+    """Văn bản sửa / tạm dừng văn bản này: ['17/2022/NĐ-CP: sửa đổi, bổ sung 50 chỗ (đã hợp nhất
+    trong 03/VBHN-BCT)', '66.18/2026/NQ-CP: tạm không thực hiện 3 chỗ'].
+    Hỏi VBHN → trả của văn bản gốc."""
+    r = conn.execute(
+        "SELECT den FROM quan_he_van_ban WHERE tu = %s AND loai = 'hop_nhat' AND den IS NOT NULL",
+        [tvpl_id],
+    ).fetchone()
+    tvpl_id = r[0] if r else tvpl_id
+    rows = conn.execute(
+        """
+        SELECT h.so_hieu, array_agg(DISTINCT s.hanh_dong), count(*),
+            (SELECT hn.so_hieu FROM quan_he_van_ban q1
+             JOIN quan_he_van_ban q2 ON q2.tu = q1.tu AND q2.loai = 'hop_nhat_sua'
+             JOIN van_ban hn ON hn.tvpl_id = q1.tu
+             WHERE q1.den = %(t)s AND q1.loai = 'hop_nhat' AND hn.dung_de_tra
+               AND q2.den_so_hieu = h.so_hieu_chuan LIMIT 1)
+        FROM sua_doi_chi_tiet s JOIN van_ban h ON h.tvpl_id = s.tu
+        WHERE s.den = %(t)s
+        GROUP BY h.so_hieu, h.so_hieu_chuan, h.ngay_ban_hanh
+        ORDER BY h.ngay_ban_hanh
+        """,
+        {"t": tvpl_id},
+    ).fetchall()
+    ra = []
+    for sh, hd, n, vbhn in rows:
+        viec = ", ".join(TEN_SUA[x] for x in TEN_SUA if x in hd)
+        ra.append(f"{sh}: {viec} {n} chỗ" + (f" (đã hợp nhất trong {vbhn})" if vbhn else ""))
+    return ra

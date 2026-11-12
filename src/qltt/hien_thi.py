@@ -344,8 +344,7 @@ def khoi_hanh_vi(conn, vb: VanBan, tl: TraLoi, i: int, h) -> list[str]:
             + (" <i>(đầy đủ ở văn bản)</i>" if cut else "")
             + "\n" + ghim(vb, muc_vt[ten])
         )  # fmt: skip
-    khoi.append("\n".join(bp))
-    return khoi
+    return khoi + bp  # bổ sung, khắc phục: mỗi mục một đoạn (cách dòng trống)
 
 
 def telegram(conn: psycopg.Connection, tl: TraLoi) -> str:
