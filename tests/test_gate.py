@@ -51,3 +51,11 @@ def test_khung_phat_nguoc_thi_truot():
 def test_ngay_lech_va_file_nhung_chi_canh_bao():
     g = kiem(vb([dieu(1)], nhung=True), "98/2020/NĐ-CP", date(2020, 8, 27))
     assert g.qua and len(g.canh_bao) == 2
+
+
+def test_vbhn_bo_dieu_bi_bai_bo_chi_canh_bao():
+    g = kiem(vb([dieu(1), dieu(3), dieu(2)]), "98/2020/NĐ-CP", None, la_vbhn=True)
+    assert g.loi == ["Số Điều không liên tục: Điều 3 → Điều 2"]  # lùi vẫn trượt
+    assert g.canh_bao == [
+        "Số Điều không liên tục: Điều 1 → Điều 3 (VBHN có thể bỏ Điều đã bị bãi bỏ)"
+    ]

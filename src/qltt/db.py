@@ -15,11 +15,14 @@ BANG_DAN_XUAT = (
     "chu_thich_vbhn",
     "quan_he_van_ban",
     "dan_chieu",
+    "muc_phat",
+    "bien_phap",
+    "sua_doi_chi_tiet",
 )
 # Bảng của schema cũ, đã bỏ: --xoa-dan-xuat xóa luôn nếu còn sót trong DB.
 BANG_DA_BO = ("phien_ban",)  # bỏ 10/11/2026: văn bản không đổi, file đổi thì thay chunk
 # Không dựng lại được: không bao giờ xóa tự động, phải nằm trong backup.
-BANG_GOC = ("nhat_ky_dong_bo", "xac_nhan", "chat_log")
+BANG_GOC = ("nhat_ky_dong_bo", "xac_nhan", "chat_log", "bao_sai")
 # Dựng lại được nhưng tốn tiền API: giữ qua các lần rebuild.
 BANG_CACHE = ("embed_cache", "llm_cache")
 
@@ -35,6 +38,8 @@ def ket_noi(dbname: str | None = None) -> psycopg.Connection:
         password=c.postgres_password.get_secret_value(),
         dbname=dbname or c.db_name,
         connect_timeout=5,
+        # chờ khóa quá 15 giây thì báo lỗi thay vì treo im lặng (vd phiên khác còn transaction dở)
+        options="-c lock_timeout=15s",
     )
 
 

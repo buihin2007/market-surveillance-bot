@@ -22,7 +22,9 @@ class KetQuaGate:
         return not self.loi
 
 
-def kiem(vb: VanBanParse, so_hieu_sheet: str, ngay_sheet: date | None) -> KetQuaGate:
+def kiem(
+    vb: VanBanParse, so_hieu_sheet: str, ngay_sheet: date | None, la_vbhn: bool = False
+) -> KetQuaGate:
     kq = KetQuaGate()
 
     if vb.so_hieu is None:
@@ -46,7 +48,12 @@ def kiem(vb: VanBanParse, so_hieu_sheet: str, ngay_sheet: date | None) -> KetQua
         kq.loi.append(f"Điều đầu tiên là Điều {so[0]}, không phải Điều 1")
     for a, b in zip(vb.dieu, vb.dieu[1:], strict=False):
         if b.so < a.so or b.so > a.so + 1 or (b.so == a.so and b.suffix <= a.suffix):
-            kq.loi.append(f"Số Điều không liên tục: Điều {a.ky_hieu} → Điều {b.ky_hieu}")
+            loi = f"Số Điều không liên tục: Điều {a.ky_hieu} → Điều {b.ky_hieu}"
+            # VBHN bỏ hẳn Điều đã bị bãi bỏ (17/VBHN-BCT: Điều 35 → 37) → chỉ cảnh báo
+            if la_vbhn and b.so > a.so + 1:
+                kq.canh_bao.append(loi + " (VBHN có thể bỏ Điều đã bị bãi bỏ)")
+            else:
+                kq.loi.append(loi)
 
     # khoản trong mỗi Điều: tăng dần (1 → 2 → 2a → 3). Nguồn có lỗi gõ thật (Luật Thủy sản
     # Điều 32 đánh hai khoản 1); chữ vẫn nằm trong Điều nên lệch khoản chỉ là cảnh báo

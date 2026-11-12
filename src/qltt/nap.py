@@ -72,7 +72,7 @@ def nap_van_ban(
 ) -> KetQuaNap:
     """Parse + gate + ghi DB trong một transaction. Gate trượt: giữ chunk cũ (nếu có)."""
     vb = parse(path)
-    g = gate.kiem(vb, d.so_hieu, d.ngay_ban_hanh)
+    g = gate.kiem(vb, d.so_hieu, d.ngay_ban_hanh, d.loai == "vbhn")
     kq = KetQuaNap(d.tvpl_id, loi=g.loi, canh_bao=g.canh_bao)
     with conn.transaction():
         conn.execute(
@@ -112,9 +112,12 @@ def nap_van_ban(
 
         cac_chunk = chunk.cat(vb, d.so_hieu)
         conn.execute("DELETE FROM chunk WHERE tvpl_id = %s", [d.tvpl_id])
+        # chú thích không gắn chunk (chunk_id NULL) không bị xóa theo chunk → xóa riêng
+        conn.execute("DELETE FROM chu_thich_vbhn WHERE tvpl_id = %s", [d.tvpl_id])
         conn.execute("DELETE FROM quan_he_van_ban WHERE tu = %s AND nguon <> 'tay'", [d.tvpl_id])
         ids: list[int] = []
         cho_chu_thich: dict[int, int] = {}
+        cho_diem: dict[int, str] = {}
         for c in cac_chunk:
             cid = conn.execute(
                 """
@@ -136,13 +139,21 @@ def nap_van_ban(
             ids.append(cid)
             for so in c.chu_thich:
                 cho_chu_thich.setdefault(so, cid)
+            cho_diem.update(c.chu_thich_diem)
 
         for so, noi_dung in vb.chu_thich.items():
             m = R_SO_TRONG_CAU.search(noi_dung)
             conn.execute(
-                "INSERT INTO chu_thich_vbhn (tvpl_id, so, chunk_id, noi_dung, vb_sua)"
-                " VALUES (%s, %s, %s, %s, %s)",
-                [d.tvpl_id, so, cho_chu_thich.get(so), noi_dung, m.group(1) if m else None],
+                "INSERT INTO chu_thich_vbhn (tvpl_id, so, chunk_id, diem, noi_dung, vb_sua)"
+                " VALUES (%s, %s, %s, %s, %s, %s)",
+                [
+                    d.tvpl_id,
+                    so,
+                    cho_chu_thich.get(so),
+                    cho_diem.get(so),
+                    noi_dung,
+                    m.group(1) if m else None,
+                ],  # fmt: skip
             )
         if d.loai == "vbhn":
             # văn bản đầu danh sách là văn bản gốc, các văn bản sau là văn bản sửa đổi đã hợp nhất
@@ -211,9 +222,12 @@ def tinh_lai(conn: psycopg.Connection, hom_nay: date) -> None:
         #     chi_sua_mot_van_ban). Văn bản sửa nhiều văn bản (17/2022, 14/2022, 124/2021, Luật Thủy
         #     sản sửa Luật XLVPHC) vẫn để tra: phần sửa văn bản khác chưa được hợp nhất ở đâu.
         #   - VBHN cũ khi có VBHN mới hơn của cùng văn bản gốc.
+        #   - văn bản bị một văn bản đang hiệu lực thay thế / bãi bỏ cả văn bản (Điều hiệu lực thi
+        #     hành, sua_doi.chi_dan_hieu_luc; hoặc quan hệ nhập tay). Sheet vẫn ghi còn hiệu lực thì
+        #     qltt sua-doi báo để chú sửa.
         conn.execute(
             """
-            UPDATE van_ban v SET dung_de_tra = v.trang_thai = 'hieu_luc'
+            UPDATE van_ban v SET dung_de_tra = v.trang_thai = 'hieu_luc' AND NOT v.go_khoi_sheet
                 AND NOT EXISTS (
                     SELECT 1 FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
                     WHERE q.den = v.tvpl_id AND q.loai = 'hop_nhat' AND h.trang_thai = 'hieu_luc')
@@ -230,6 +244,10 @@ def tinh_lai(conn: psycopg.Connection, hom_nay: date) -> None:
                     JOIN van_ban h ON h.tvpl_id = q2.tu
                     WHERE q1.tu = v.tvpl_id AND q1.loai = 'hop_nhat'
                         AND h.trang_thai = 'hieu_luc' AND h.ngay_ban_hanh > v.ngay_ban_hanh)
+                AND NOT EXISTS (
+                    SELECT 1 FROM quan_he_van_ban q JOIN van_ban h ON h.tvpl_id = q.tu
+                    WHERE q.den = v.tvpl_id AND q.loai IN ('thay_the', 'bai_bo')
+                        AND q.nguon IN ('dieu_hieu_luc', 'tay') AND h.trang_thai = 'hieu_luc')
             """
         )
         conn.execute(

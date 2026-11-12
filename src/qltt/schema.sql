@@ -46,12 +46,18 @@ CREATE TABLE IF NOT EXISTS van_ban (
     qltt_lien_quan    boolean NOT NULL DEFAULT false,
     mucphat_cua       text    CHECK (mucphat_cua IN ('ca_nhan', 'to_chuc')),
     mucphat_ngoai_le  jsonb   NOT NULL DEFAULT '[]',
+    -- van_ban: câu "Mức phạt tiền quy định tại … là mức phạt đối với cá nhân/tổ chức";
+    -- suy_ra: chỉ có câu "tổ chức gấp 02 lần cá nhân" / "cá nhân bằng 1/2 tổ chức" → cần người xác nhận
+    mucphat_cua_nguon text    CHECK (mucphat_cua_nguon IN ('van_ban', 'suy_ra')),
     canh_bao          jsonb   NOT NULL DEFAULT '[]',  -- cảnh báo của lần parse gần nhất
     loi               jsonb   NOT NULL DEFAULT '[]',  -- lỗi gate lần gần nhất; có chunk cũ thì vẫn dùng chunk cũ
     dong_bo_luc       timestamptz,
     -- số hiệu VBHN lặp lại theo năm (03/VBHN-BCT có bản 2022 và 2025) nên phải kèm ngày
     UNIQUE (so_hieu_chuan, ngay_ban_hanh)
 );
+-- DB tạo trước 11/11/2026: thêm cột không cần xóa bảng
+ALTER TABLE van_ban ADD COLUMN IF NOT EXISTS mucphat_cua_nguon text
+    CHECK (mucphat_cua_nguon IN ('van_ban', 'suy_ra'));
 
 -- Đơn vị tìm kiếm, 2 cấp: Điều (toàn văn) và khoản.
 -- File đổi: xóa chunk cũ và ghi chunk mới trong một transaction (không giữ phiên bản cũ).
@@ -88,6 +94,60 @@ CREATE INDEX IF NOT EXISTS chunk_tsv ON chunk USING gin (tsv);
 -- đo thời gian ở GĐ 1 rồi mới quyết.
 
 -- Một dòng = một chỗ văn bản vb_sua sửa vào văn bản khác. (GĐ 3, có thể chỉnh khi viết phần trích.)
+-- Khung phạt tách từ chữ khoản xử phạt (muc_phat.py). Dựng lại toàn bộ sau mỗi lần nạp.
+-- Mỗi dòng: một hành vi (khoản hoặc điểm) + khung + điều kiện định lượng. Code tra bảng này để
+-- đưa mức phạt; LLM không viết con số.
+CREATE TABLE IF NOT EXISTS muc_phat (
+    id             serial  PRIMARY KEY,
+    chunk_id       integer NOT NULL REFERENCES chunk ON DELETE CASCADE,
+    tvpl_id        integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    dieu_so        integer,
+    dieu_suffix    text    NOT NULL DEFAULT '',
+    khoan_so       integer,
+    khoan_suffix   text    NOT NULL DEFAULT '',
+    diem           text,                 -- null: cả khoản
+    hanh_vi        text    NOT NULL,     -- chữ gốc mô tả hành vi
+    loai           text    NOT NULL CHECK (loai IN (
+                       'tien', 'canh_cao', 'canh_cao_hoac_tien', 'gap_lan', 'lan_gia_tri',
+                       'khong_tach', 'sua_doi')),
+    tu             bigint,               -- đồng (loai tien, canh_cao_hoac_tien)
+    den            bigint,
+    he_so          numeric,              -- gap_lan: N; lan_gia_tri: từ N lần
+    he_so_den      numeric,              -- lan_gia_tri: đến M lần
+    tran           bigint,               -- "nhưng không vượt quá X đồng"
+    tham_chieu     jsonb   NOT NULL DEFAULT '[]',  -- gap_lan: các khoản được nhân
+    hanh_vi_tai    jsonb   NOT NULL DEFAULT '[]',  -- bậc phạt cho hành vi định nghĩa ở khoản khác
+    dk_tu          numeric,              -- điều kiện định lượng (giá trị hàng, số lợi, số lượng)
+    dk_tu_bao_gom  boolean,
+    dk_den         numeric,
+    dk_den_bao_gom boolean,
+    dk_don_vi      text,
+    dk_doi_tuong   text    CHECK (dk_doi_tuong IN ('gia_tri', 'so_loi', 'so_luong')),
+    dk_chu         text,                 -- chữ gốc của điều kiện
+    nguon          text    NOT NULL DEFAULT ''     -- chữ gốc của khung
+);
+CREATE INDEX IF NOT EXISTS muc_phat_dieu ON muc_phat (tvpl_id, dieu_so, dieu_suffix, khoan_so);
+
+-- Hình thức xử phạt bổ sung / biện pháp khắc phục hậu quả tách theo biện pháp (bien_phap.py).
+-- Dựng lại sau mỗi lần nạp. ap_dung: [{"khoan": 1, "diem": ["a", "b"]}] (diem rỗng: cả khoản);
+-- ca_dieu: áp cho mọi hành vi của Điều; tach_duoc = false: không đọc được dẫn chiếu, bot trích
+-- nguyên văn.
+CREATE TABLE IF NOT EXISTS bien_phap (
+    id          serial  PRIMARY KEY,
+    chunk_id    integer NOT NULL REFERENCES chunk ON DELETE CASCADE,
+    tvpl_id     integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
+    dieu_so     integer,
+    dieu_suffix text    NOT NULL DEFAULT '',
+    khoan_so    integer,
+    diem        text,
+    loai        text    NOT NULL CHECK (loai IN ('bo_sung', 'khac_phuc')),
+    noi_dung    text    NOT NULL,
+    ap_dung     jsonb   NOT NULL DEFAULT '[]',
+    ca_dieu     boolean NOT NULL DEFAULT false,
+    tach_duoc   boolean NOT NULL DEFAULT true
+);
+CREATE INDEX IF NOT EXISTS bien_phap_dieu ON bien_phap (tvpl_id, dieu_so, dieu_suffix);
+
 CREATE TABLE IF NOT EXISTS sua_doi (
     id                bigint  GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     vb_sua            integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,
@@ -129,6 +189,10 @@ CREATE TABLE IF NOT EXISTS quan_he_van_ban (
     nguon       text    NOT NULL CHECK (nguon IN ('dieu_hieu_luc', 'dau_vbhn', 'tay')),
     PRIMARY KEY (tu, den_so_hieu, loai)
 );
+-- 11/11 (GĐ 3.1): thêm nguồn ten_dieu (tên Điều "Sửa đổi … Nghị định số X" của văn bản sửa đổi)
+ALTER TABLE quan_he_van_ban DROP CONSTRAINT IF EXISTS quan_he_van_ban_nguon_check;
+ALTER TABLE quan_he_van_ban ADD CONSTRAINT quan_he_van_ban_nguon_check
+    CHECK (nguon IN ('dieu_hieu_luc', 'dau_vbhn', 'ten_dieu', 'tay'));
 
 -- Dẫn chiếu từ một chunk sang văn bản khác, một bước. (GĐ 3.)
 CREATE TABLE IF NOT EXISTS dan_chieu (
@@ -189,6 +253,34 @@ CREATE TABLE IF NOT EXISTS chat_log (
 );
 CREATE INDEX IF NOT EXISTS chat_log_luc ON chat_log (luc);
 
+-- Chú bấm "Báo sai" (một câu trả lời có thể bị báo nhiều lần). ikm xem vết trong chat_log, ghi
+-- nguyên nhân (khâu hỏng), sửa, đưa thành case eval, rồi báo lại chú.
+CREATE TABLE IF NOT EXISTS bao_sai (
+    id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    chat_log_id   bigint NOT NULL REFERENCES chat_log ON DELETE CASCADE,
+    luc           timestamptz NOT NULL DEFAULT now(),
+    nguoi         bigint,
+    ly_do         text,
+    trang_thai    text   NOT NULL DEFAULT 'moi'
+                  CHECK (trang_thai IN ('moi', 'da_sua', 'khong_loi', 'chua_sua_duoc')),
+    kieu          text,      -- nút chú bấm: sai_hanh_vi | sai_muc_phat | sai_bien_phap | ...
+    nguyen_nhan   text,      -- khâu hỏng ikm xác nhận (ràng buộc ở dưới)
+    case_id       text,      -- case eval tạo từ báo cáo này
+    ghi_chu_xu_ly text,
+    xu_ly_luc     timestamptz,
+    da_bao_lai    boolean NOT NULL DEFAULT false  -- đã nhắn lại chú kết quả xử lý
+);
+CREATE INDEX IF NOT EXISTS bao_sai_trang_thai ON bao_sai (trang_thai);
+-- Bản bao_sai đầu (11/11) chưa có kieu và nguyen_nhan chưa có bien_phap: thêm / đặt lại ràng buộc.
+ALTER TABLE bao_sai ADD COLUMN IF NOT EXISTS kieu text;
+ALTER TABLE bao_sai DROP CONSTRAINT IF EXISTS bao_sai_kieu_check;
+ALTER TABLE bao_sai ADD CONSTRAINT bao_sai_kieu_check CHECK (kieu IN (
+    'sai_hanh_vi', 'sai_muc_phat', 'sai_bien_phap', 'van_ban_cu', 'khong_tim_thay',
+    'sai_quy_dinh', 'khac'));
+ALTER TABLE bao_sai DROP CONSTRAINT IF EXISTS bao_sai_nguyen_nhan_check;
+ALTER TABLE bao_sai ADD CONSTRAINT bao_sai_nguyen_nhan_check CHECK (nguyen_nhan IN (
+    'phan_loai', 'tim_kiem', 'chon', 'muc_phat', 'bien_phap', 'kho_thieu', 'khong_loi', 'khac'));
+
 
 -- ============================= CACHE =============================
 
@@ -208,3 +300,34 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     dau_ra jsonb NOT NULL,
     tao_luc timestamptz NOT NULL DEFAULT now()
 );
+
+-- 11/11 (GĐ 3.2): từng chỉ dẫn sửa đổi của văn bản sửa đổi, trỏ tới Điều / khoản bị sửa.
+-- Dựng lại toàn bộ sau nạp (sua_doi.dung_chi_tiet). Dùng để cảnh báo khi bot trích Điều / khoản đã
+-- bị sửa mà văn bản bot đọc (gốc hoặc VBHN cũ) chưa có chữ mới.
+CREATE TABLE IF NOT EXISTS sua_doi_chi_tiet (
+    id           serial  PRIMARY KEY,
+    tu           integer NOT NULL REFERENCES van_ban ON DELETE CASCADE,  -- văn bản sửa đổi
+    chunk_id     integer NOT NULL REFERENCES chunk ON DELETE CASCADE,    -- khoản / Điều chứa chỉ dẫn
+    vi_tri_tu    text    NOT NULL,           -- "khoản 3 Điều 1" của văn bản sửa đổi
+    den_so_hieu  text    NOT NULL,
+    den          integer REFERENCES van_ban ON DELETE SET NULL,
+    dieu_so      integer,                    -- NULL: chỉ dẫn cho cả văn bản (đổi tên, thay cụm từ)
+    dieu_suffix  text    NOT NULL DEFAULT '',
+    khoan        integer[] NOT NULL DEFAULT '{}',  -- rỗng: cả Điều
+    hanh_dong    text    NOT NULL,
+    mo_ta        text    NOT NULL,           -- câu chỉ dẫn (bỏ phần trong ngoặc kép)
+    noi_dung_moi text    NOT NULL DEFAULT '',  -- phần trong ngoặc kép: chữ mới
+    chac         boolean NOT NULL            -- false: văn bản đích đoán (Điều sửa nhiều văn bản)
+);
+CREATE INDEX IF NOT EXISTS sua_doi_chi_tiet_den ON sua_doi_chi_tiet (den, dieu_so, dieu_suffix);
+-- 12/11: thêm khong_thuc_hien (nghị quyết 19/2026, 66.18/2026: "Không thực hiện thủ tục … tại Điều …")
+ALTER TABLE sua_doi_chi_tiet DROP CONSTRAINT IF EXISTS sua_doi_chi_tiet_hanh_dong_check;
+ALTER TABLE sua_doi_chi_tiet ADD CONSTRAINT sua_doi_chi_tiet_hanh_dong_check
+    CHECK (hanh_dong IN ('sua_doi', 'bo_sung', 'bai_bo', 'thay_cum_tu', 'khong_thuc_hien'));
+
+-- 12/11 (GĐ 3.5): dòng sheet bị xóa → giữ dữ liệu nhưng thôi dùng để tra (qltt dong-bo)
+ALTER TABLE van_ban ADD COLUMN IF NOT EXISTS go_khoi_sheet boolean NOT NULL DEFAULT false;
+
+-- 12/11: chú thích "[n]" nằm ở điểm nào của khoản (dòng "b)[91] …"), để trích "điểm b khoản …
+-- được sửa đổi tại …" đúng tới điểm. Cần qltt nap --lam-lai để điền cho VBHN đã nạp.
+ALTER TABLE chu_thich_vbhn ADD COLUMN IF NOT EXISTS diem text;

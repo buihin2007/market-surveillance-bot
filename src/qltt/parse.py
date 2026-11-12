@@ -70,7 +70,8 @@ LOAI_GOC = (
     "QUYẾT ĐỊNH",
     "NGHỊ QUYẾT",
 )
-R_SO_TRONG_CAU = re.compile(r"số\s+(\d+/\d{4}/[A-ZĐ0-9-]*[A-ZĐ0-9])")
+# "sô" là lỗi gõ có thật (52/VBHN-BCT: "Nghị định sô 17/2020/NĐ-CP"); 66.18/2026/NQ-CP có dấu chấm
+R_SO_TRONG_CAU = re.compile(r"s[ốô]\s+(\d+(?:\.\d+)?/\d{4}/[A-ZĐ0-9-]*[A-ZĐ0-9])")
 R_HET_GIOI_THIEU = re.compile(
     r"^(?:Căn cứ|Theo đề nghị|Chính phủ ban hành|Quốc hội ban hành|Bộ trưởng)"
 )
@@ -95,6 +96,8 @@ class Khoan:
     suffix: str
     text: str  # cả các điểm a), b)... và nội dung sửa đổi trong ngoặc kép
     chu_thich: list[int] = field(default_factory=list)
+    # VBHN: chú thích "[n]" nằm ở dòng điểm nào ("b)[91] Phạt tiền …") → n: "b"
+    diem_chu_thich: dict[int, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -283,6 +286,8 @@ def parse(path: str | Path) -> VanBanParse:
             k = d.khoan[-1]
             k.text = f"{k.text}\n{t}" if t else k.text
             k.chu_thich += ct
+            if ct and (md := re.match(r"^([a-zđ])\)", t)):
+                k.diem_chu_thich |= dict.fromkeys(ct, md.group(1))
         else:
             d.dau = f"{d.dau}\n{t}".strip()
             d.chu_thich += ct

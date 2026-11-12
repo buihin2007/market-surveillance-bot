@@ -46,6 +46,7 @@ class Chunk:
     dieu_ten: str | None = None
     cha: int | None = None  # vị trí chunk Điều trong danh sách (với khoản)
     chu_thich: list[int] = field(default_factory=list)
+    chu_thich_diem: dict[int, str] = field(default_factory=dict)  # số chú thích → điểm
 
 
 def ten_ngan(vb: VanBanParse, so_hieu: str) -> str:
@@ -141,6 +142,7 @@ def cat(vb: VanBanParse, so_hieu: str) -> list[Chunk]:
                     khoan_suffix=k.suffix,
                     cha=i_dieu,
                     chu_thich=list(k.chu_thich),
+                    chu_thich_diem=dict(k.diem_chu_thich),
                     **chung,
                 )
             )

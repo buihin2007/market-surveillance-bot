@@ -15,6 +15,9 @@ from qltt.parse import chuan_so_hieu
 
 NHOM = {"chinh", "khong_co"}  # khong_co: kho không có quy định → bot phải nói không tìm thấy
 KIEM = {"so_tay", "claude_de_xuat", "nguoi_da_kiem"}
+# loại câu hỏi (GĐ 2.2): hanh_vi → tra xử phạt; quy_dinh → trích quy định; còn lại → tin hướng dẫn
+LOAI_THU_TU = ("hanh_vi", "quy_dinh", "ngoai_pham_vi", "khac")
+LOAI = set(LOAI_THU_TU)
 R_DIEU = re.compile(r"^(\d+)([a-zđ]?)$")
 
 
@@ -41,6 +44,7 @@ class Case:
     khung_phat: list[dict] = field(default_factory=list)
     bo_sung: list[str] = field(default_factory=list)
     khac_phuc: list[str] = field(default_factory=list)
+    loai: str = "hanh_vi"
 
 
 def _tu_dict(d: dict) -> Case:
@@ -52,6 +56,10 @@ def _tu_dict(d: dict) -> Case:
         loi.append(f"nhom lạ: {c.nhom!r}")
     if c.kiem not in KIEM:
         loi.append(f"kiem lạ: {c.kiem!r}")
+    if c.loai not in LOAI:
+        loi.append(f"loai lạ: {c.loai!r}")
+    if c.loai in {"ngoai_pham_vi", "khac"} and c.nhom != "khong_co":
+        loi.append("loai ngoai_pham_vi / khac phải thuộc nhom khong_co")
     if c.cap_cham not in {"dieu", "khoan"}:
         loi.append(f"cap_cham lạ: {c.cap_cham!r}")
     if not c.cau_hoi.strip():

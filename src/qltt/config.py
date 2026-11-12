@@ -34,12 +34,33 @@ class CauHinh(BaseSettings):
     # 10/11/2026: bge-m3 recall@20 câu đời thường 0,77 so với 0,46 của text-embedding-3-small.
     embed_model: str = "baai/bge-m3"
     embed_gia_1m_token: float = 0.01  # USD, chỉ để in ước tính chi phí
-    # LLM (viết lại câu hỏi; GĐ 2: trả lời). Rẻ, nhanh, đọc tiếng Việt tốt.
-    llm_model: str = "google/gemini-3.1-flash-lite"
-    llm_gia_1m_vao: float = 0.25  # USD / 1 triệu token đầu vào, chỉ để in ước tính
-    llm_gia_1m_ra: float = 1.50
-    # v1 | v2 (+ định nghĩa) | v3 (+ danh mục hành vi) | v4 (cả hai). Chọn v2 ngày 11/11/2026 theo eval.
-    viet_lai_prompt: str = "v2"
+    # LLM (viết lại câu hỏi; GĐ 2: trả lời). 11/11/2026, prompt v2, câu đời thường: DeepSeek V4.1
+    # Flash tắt suy nghĩ 35/39 (giữ lại 6/9), ngang gemini-3.1-flash-lite 35/39 (7/9) nhưng rẻ hơn
+    # ~20 lần. Dự phòng: LLM_MODEL=google/gemini-3.1-flash-lite.
+    llm_model: str = "deepseek/deepseek-v4.1-flash"
+    # Tắt chế độ suy nghĩ (reasoning effort none). Model bắt buộc suy nghĩ thì đặt false.
+    llm_tat_suy_nghi: bool = True
+    # Giá chỉ dùng khi API không trả chi phí thật (usage.cost); OpenRouter luôn trả.
+    llm_gia_1m_vao: float = 0.006
+    llm_gia_1m_ra: float = 0.50
+    # Prompt viết lại: v1 | v2 (+ định nghĩa) | v3 (+ danh mục hành vi) | v4 (cả hai) |
+    # v5 (v2 + phân loại câu hỏi). 11/11/2026, DeepSeek V4.1 Flash: v5 phân loại 60/60, câu đời
+    # thường Đ@5 36/39 (v2: 35/39) → chọn v5 (qltt-tien-do.md).
+    viet_lai_prompt: str = "v5"
+
+    # Telegram (GĐ 4). Token lấy từ @BotFather, KHÔNG dán vào chat / commit.
+    telegram_token: SecretStr = SecretStr("")
+    # chat_id được dùng bot, cách nhau dấu phẩy (chú, ikm). Người ngoài danh sách: bot im lặng.
+    telegram_cho_phep: str = ""
+    # chat_id nhận báo lỗi và báo sai (ikm). Trống: không báo.
+    telegram_admin: int | None = None
+    # Telegram bị chặn ở VN: nếu máy chạy bot không tới được api.telegram.org thì đặt proxy,
+    # vd http://127.0.0.1:7890 hoặc socks5://127.0.0.1:1080 (socks cần gói httpx[socks]).
+    telegram_proxy: str = ""
+
+    @property
+    def ds_cho_phep(self) -> set[int]:
+        return {int(x) for x in self.telegram_cho_phep.replace(" ", "").split(",") if x}
 
 
 @lru_cache

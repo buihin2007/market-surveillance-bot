@@ -47,11 +47,12 @@ def _lo(cac: list[tuple[int, str, str]]):
         yield lo
 
 
-def tao_client(api_key: str, base_url: str):
+def tao_client(api_key: str, base_url: str, max_retries: int = 6, timeout: float = 120):
+    """Mặc định cho lệnh chạy lô (embed). Bot: timeout ngắn, ít lần thử để chú không chờ lâu."""
     from openai import OpenAI
 
-    # SDK tự thử lại khi 429 (giới hạn tốc độ) và lỗi 5xx, có giãn cách
-    return OpenAI(api_key=api_key, base_url=base_url, max_retries=6, timeout=120)
+    # SDK tự thử lại khi 429 (giới hạn tốc độ), lỗi 5xx và quá thời gian, có giãn cách
+    return OpenAI(api_key=api_key, base_url=base_url, max_retries=max_retries, timeout=timeout)
 
 
 def goi_api(client, model: str, texts: list[str]) -> tuple[list[list[float]], int]:

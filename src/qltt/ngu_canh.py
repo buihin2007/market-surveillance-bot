@@ -78,15 +78,18 @@ def lap(
     cau_hoi: str,
     vec: list[float] | None,
     viet_lai: list[tuple[str, list[float] | None]] = (),
+    n: int = SO_HANH_VI,
+    co_quy_pham: bool = True,
 ) -> NguCanh:
     """viet_lai: các cách diễn đạt khác của câu hỏi (kèm vector), tìm thêm rồi gộp với câu gốc."""
     cau = [cau_hoi, *(q for q, _ in viet_lai)]
     vecs = [vec, *(v for _, v in viet_lai)]
-    hv = hanh_vi(conn, tim_kiem.tim_nhieu(conn, cau, vecs))
+    hv = hanh_vi(conn, tim_kiem.tim_nhieu(conn, cau, vecs), n)
     van_ban = tuple(dict.fromkeys(h.khoa[0] for h in hv))
     loc_dn = Loc(vai_tro=None, loai_chunk=("giai_thich",), tvpl_ids=van_ban)
     dinh_nghia = tim_kiem.tim_nhieu(conn, cau, vecs, loc_dn) if van_ban else []
-    quy_pham = tim_kiem.tim_nhieu(conn, cau, vecs, Loc(vai_tro="quy_pham"))
+    # quy phạm toàn kho: chỉ để in ở `qltt tim`; luồng trả lời không dùng (tiết kiệm ~1 s)
+    quy_pham = tim_kiem.tim_nhieu(conn, cau, vecs, Loc(vai_tro="quy_pham")) if co_quy_pham else []
     return NguCanh(
         cau_hoi,
         hv,

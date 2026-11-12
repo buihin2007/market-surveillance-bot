@@ -22,7 +22,7 @@ class ChatGia:
         nd = self.tra_loi.pop(0)
         return NS(
             choices=[NS(message=NS(content=nd))],
-            usage=NS(prompt_tokens=300, completion_tokens=40),
+            usage=NS(prompt_tokens=300, completion_tokens=40, cost=0.0001),
         )
 
 
@@ -56,7 +56,10 @@ def test_goi_mot_lan_roi_lay_cache(csdl):
     )  # fmt: skip
     goi = api.goi[0]
     assert goi["temperature"] == 0
-    assert goi["extra_body"] == {"provider": {"data_collection": "deny"}}
+    assert goi["extra_body"] == {
+        "provider": {"data_collection": "deny"}, "usage": {"include": True}
+    }  # fmt: skip
+    assert kq.chi_phi == 0.0001 and kq.giay >= 0
     assert goi["messages"][0]["role"] == "system" and goi["messages"][-1]["content"] == (
         "bán hàng không hóa đơn"
     )
@@ -76,7 +79,11 @@ def test_tra_loi_hong_thi_khong_luu_cache(csdl):
 
 def test_vi_du_trong_prompt_khong_lay_tu_bo_eval():
     cases = danh_gia.doc_cases(Path(__file__).parent.parent / "eval" / "cases.jsonl")
-    prompt = viet_lai.HE_THONG + json.dumps(viet_lai.VI_DU, ensure_ascii=False)
+    prompt = (
+        viet_lai.HE_THONG
+        + viet_lai.HE_THONG_PHAN_LOAI
+        + json.dumps([viet_lai.VI_DU, viet_lai.VI_DU_PHAN_LOAI], ensure_ascii=False)
+    )
     for x in cases:
         assert x.cau_hoi not in prompt and x.cau_hoi_nguyen_van.lower() not in prompt.lower()
 
@@ -108,3 +115,39 @@ def test_prompt_v2_v3_lay_dinh_nghia_va_danh_muc_tu_kho(conn, tmp_path):
     conn.execute("DELETE FROM llm_cache")
     assert viet_lai.viet_lai(conn, api, "m", "bán đồ dỏm", "v3").cau == ["buôn bán hàng giả"]
     assert api.goi[0]["messages"][0]["content"] == v3
+
+
+def test_tat_suy_nghi_gui_reasoning_none_va_tach_cache(csdl):
+    api = ChatGia('{"hanh_vi": ["a"]}', '{"hanh_vi": ["b"]}')
+    assert viet_lai.viet_lai(csdl, api, "m", "q", "v1", tat_suy_nghi=True).cau == ["a"]
+    assert api.goi[0]["extra_body"]["reasoning"] == {"effort": "none"}
+    assert viet_lai.viet_lai(csdl, api, "m", "q").cau == ["b"]  # bật suy nghĩ: khóa cache khác
+    assert "reasoning" not in api.goi[1]["extra_body"]
+
+
+@pytest.mark.parametrize(
+    ("tra_loi", "mong"),
+    [
+        ('{"loai": "hanh_vi", "hanh_vi": ["buôn bán hàng giả"]}',
+         {"loai": "hanh_vi", "hanh_vi": ["buôn bán hàng giả"]}),
+        ('{"loai": "quy_dinh", "hanh_vi": ["điều kiện bán lẻ"]}',
+         {"loai": "quy_dinh", "hanh_vi": ["điều kiện bán lẻ"]}),
+        ('{"loai": "khac", "hanh_vi": ["x"]}', {"loai": "khac", "hanh_vi": []}),  # bỏ cụm thừa
+        ('{"loai": "ngoai_pham_vi", "hanh_vi": []}', {"loai": "ngoai_pham_vi", "hanh_vi": []}),
+        ('{"loai": "hanh_vi", "hanh_vi": []}', None),  # hành vi mà không viết cụm nào
+        ('{"loai": "phap_ly", "hanh_vi": ["a"]}', None),  # loại lạ
+        ("không phải JSON", None),
+    ],
+)  # fmt: skip
+def test_doc_phan_loai(tra_loi, mong):
+    assert viet_lai.doc_phan_loai(tra_loi) == mong
+
+
+def test_v5_tra_loai_va_dung_vi_du_phan_loai(csdl):
+    api = ChatGia('{"loai": "quy_dinh", "hanh_vi": ["điều kiện bán lẻ xăng dầu"]}')
+    kq = viet_lai.viet_lai(csdl, api, "m", "cây xăng cần điều kiện gì", "v5")
+    assert (kq.loai, kq.cau, kq.chi_phi) == ("quy_dinh", ["điều kiện bán lẻ xăng dầu"], 0.0001)
+    tin = api.goi[0]["messages"]
+    assert '"loai"' in tin[0]["content"] and any('"loai": "khac"' in m["content"] for m in tin)
+    lan_2 = viet_lai.viet_lai(csdl, api, "m", "cây xăng cần điều kiện gì", "v5")
+    assert lan_2.tu_cache and lan_2.loai == "quy_dinh" and len(api.goi) == 1
