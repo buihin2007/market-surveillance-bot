@@ -10,24 +10,142 @@ Documents come from thuvienphapluat.vn (TVPL). The officer maintains the documen
 Sheet and the .docx files in a Google Drive folder; the bot reads both (read-only) and keeps
 everything else in Postgres.
 
-## How it works
+## System architecture
 
-1. **Sync** (`qltt dong-bo`, `/dongbo`): read the Sheet and Drive, download new or changed files,
-   parse each .docx into articles (Điều), clauses (khoản) and points (điểm), run sanity checks
-   (gate), store chunks, then recompute the whole store: which documents are in force, which are
-   superseded by a consolidated text (VBHN) or a replacing decree, amendment relations, fine
-   tables, cross-references, and embeddings.
-2. **Answer** (LangGraph pipeline): classify and rewrite the question with an LLM, hybrid search
-   (pgvector + Postgres full-text, merged with RRF), let the LLM pick the matching violation(s),
-   then read fines and measures from parsed tables, not from the LLM.
-3. **Cite**: the "📋 Quy định tại" button builds the full legal basis from VBHN footnotes and
-   amendment records, e.g. "điểm b khoản 1 Điều 31 Nghị định số 119/2017/NĐ-CP … được sửa đổi,
-   bổ sung tại khoản 48 Điều 2 Nghị định số 126/2021/NĐ-CP …", with links to every related
-   document.
-4. **Warn**: amendments not yet consolidated, repeals and temporary suspensions (resolutions) are
-   shown as ⚠️ lines.
-5. **Feedback**: the "⚠️ Báo sai" button records what was wrong and the correct basis; the admin
-   gets a copy and can turn it into an eval case.
+```mermaid
+flowchart LR
+    officer["Officer (Telegram app)"] <--> tg["Telegram Bot API"]
+    admin["Admin (Telegram)"] <--> tg
+    tg <-->|long polling| bot
+
+    subgraph host["Server / dev machine (Docker Compose)"]
+        bot["bot container<br/>python-telegram-bot + LangGraph<br/>qltt CLI"]
+        db[("db container<br/>Postgres 16 + pgvector")]
+        raw[/"data/raw<br/>.docx copies"/]
+        bot <--> db
+        bot <--> raw
+    end
+
+    bot -->|read-only, service account| google["Google Sheets + Drive<br/>(document list + .docx files)"]
+    bot -->|chat completions| llm["OpenRouter: DeepSeek V4.1 Flash"]
+    bot -->|embeddings| emb["OpenRouter: BAAI bge-m3 (1024-d)"]
+```
+
+One Python process (`qltt bot`) serves Telegram, runs the answer pipeline and the sync; one
+Postgres database holds documents, vectors, derived tables, caches and logs. There is no web
+server and no inbound port: every connection is outbound. The officer owns the source of truth
+(Sheet + Drive); everything in the database except logs can be rebuilt from it.
+
+### Data flow: sync (ingestion)
+
+```mermaid
+flowchart LR
+    sheet[Sheet rows] --> plan
+    drive[Drive files + md5] --> plan
+    plan["plan<br/>new / changed / unchanged /<br/>missing / extra / wrong file"] --> load
+    load["download → parse .docx → gate<br/>→ chunks + footnotes + relations"] --> recompute
+    recompute["recompute store<br/>status, VBHN supersession,<br/>amendments, fines, measures,<br/>cross-references"] --> embed["embed new chunks<br/>(cache first)"] --> report["report<br/>(CLI / Telegram)"]
+```
+
+### Data flow: answering a question
+
+```mermaid
+flowchart TD
+    q[Question] --> h["hieu_cau_hoi<br/>LLM 1: classify + rewrite"]
+    h -->|khac / ngoai_pham_vi| out
+    h -->|quy_dinh| tq["tim_quy_dinh<br/>hybrid search, 6 articles"] --> ct["chon_trich<br/>LLM: quote, verified verbatim"] --> out
+    h -->|hanh_vi| th["tim_hanh_vi<br/>hybrid search → 8 penalty articles<br/>→ candidate behaviours H1..Hn"]
+    th --> ch["chon_hanh_vi<br/>LLM 2: pick ≤3 ids + subject,<br/>goods value, quantity"]
+    ch --> mp["tra_muc_phat<br/>fines + measures from tables"] --> out
+    out["dinh_dang<br/>answer + warnings + citations"] --> log[(chat_log)]
+```
+
+## Detailed design
+
+**Parsing.** `python-docx` reads TVPL .docx files into header (number, date, type), articles,
+clauses, points and appendices. Consolidated texts (VBHN) carry footnote markers `[n]` and a
+footnote list; each footnote is attached to the chunk and, when placed on a point, to that point
+(`chu_thich_vbhn.diem`). A gate rejects a file whose structure looks wrong (numbering gaps, wrong
+document number/date) and keeps the previous version in use.
+
+**Chunks.** Two levels: whole article and each clause, plus list-type appendices. Each chunk gets
+a role (`xu_phat`: names a violation with a fine; `quy_pham`: a rule) and a type (violation,
+additional penalty, remedial measure, definitions, scope, …). Embedded text is prefixed with its
+document/article context. Postgres `tsvector('simple')` with a GIN index serves keyword search.
+
+**Document status.** Recomputed for the whole store on every sync from the sheet dates and today:
+in force / not yet / expired. A document is used for lookup only if it is in force, not superseded
+by a VBHN in force (the base decree and amendments already consolidated are then read through the
+VBHN), not replaced or repealed by a document in force (read from the "entry into force" article),
+and still on the sheet.
+
+**Amendments.** Two sources. (1) Amending documents are parsed instruction by instruction
+("khoản 3 Điều 6 được sửa đổi như sau: …", appendix lines, "không thực hiện …" in resolutions)
+into `sua_doi_chi_tiet` (action, target article/clauses, new text). (2) VBHN footnotes record
+amendments already consolidated. An amendment newer than the VBHN in use, or for a document with
+no VBHN, becomes a ⚠️ warning on the answer; temporary suspensions by resolutions are warnings
+only and never part of the legal basis.
+
+**Fines and measures.** `muc_phat` parses each penalty clause into tiers: range per individual /
+organisation, conditions by goods value or quantity, warnings, "N times" multipliers
+(aggravating cases); `bien_phap` maps additional penalties and remedial measures to the clauses
+they apply to. The answer reads amounts from these tables; the LLM never writes a number.
+
+**Search.** Hybrid: exact vector search (pgvector, cosine, full scan, no ANN index at ~22k chunks)
+and full-text search, 50 candidates each, merged with Reciprocal Rank Fusion (k = 60, keyword
+weight 0.5). Search runs on both the original and the rewritten question. Penalty search is
+restricted to `xu_phat` chunks of documents in use; definitions and related rules are fetched
+separately as context.
+
+**Answering.** LLM 1 classifies (`hanh_vi`, `quy_dinh`, `ngoai_pham_vi`, `khac`) and rewrites
+everyday wording into legal terms (prompt v5, with definitions drawn from the store). For
+violations, candidate behaviours from the top 8 articles get ids H1..Hn; LLM 2 only picks ids
+(unknown ids are rejected and retried once) and extracts subject, goods value and quantity; code
+then selects the fine tier. For rule questions, quotes are checked character by character against
+the source; a failed quote falls back to the whole clause.
+
+**Citations.** `can_cu` builds report-style legal basis down to the point: base decree plus each
+amendment ("được sửa đổi, bổ sung tại …"), from the footnotes on the article (except title-only
+footnotes), the clause and the point, plus unconsolidated amendments, ordered by issue date. The
+"📋 Quy định tại" message lists one block per item (violation, fine, aggravating, additional
+penalty, remedial measure) and links every related document (VBHN, base, amending, suspending,
+cross-referenced; TVPL search link when not in the store).
+
+**Feedback and observability.** Every answer is stored in `chat_log` with a per-step trace
+(input, output, time, tokens, cost). "⚠️ Báo sai" records the error type and the officer's
+correct basis; the admin receives errors, reports, `/dongbo` reports and a live copy of each
+question. `qltt nhat-ky --theo-doi` follows the log from a terminal; reports can be turned into
+eval cases.
+
+**Cost and caching.** Embeddings are cached by content hash and model (`embed_cache`), so
+re-parsing or switching models back costs nothing; LLM calls are cached by prompt version and
+input (`llm_cache`), so repeated questions cost nothing. Each answer logs its real cost (from
+OpenRouter usage). OpenRouter requests set `provider.data_collection: deny`.
+
+**Security.** Bot replies only to chat_ids in `TELEGRAM_CHO_PHEP`. Google access is a read-only
+service account (Viewer on one folder). Secrets live in `.env` and `secrets/`, mounted into the
+container at run time, never in the image or git. Postgres is not exposed on servers.
+
+**Quality.** ~280 pytest tests (parsing, gate, amendments, citations, fines, sync, bot flows on
+a real Postgres test database) and an evaluation set (`eval/cases.jsonl`) measuring search
+recall, classification, behaviour selection and rule answers on everyday questions.
+
+## Tech stack
+
+| Layer | Choice |
+|---|---|
+| Language, packaging | Python 3.12, uv, hatchling |
+| Chat interface | Telegram via python-telegram-bot 22 (long polling, HTML messages, inline keyboards) |
+| Orchestration | LangGraph (answer graph), plain Python modules for each step |
+| LLM | DeepSeek V4.1 Flash via OpenRouter (OpenAI-compatible `openai` client), reasoning off |
+| Embeddings | BAAI bge-m3 via OpenRouter, 1024 dimensions |
+| Database | PostgreSQL 16 + pgvector 0.8.7, unaccent, pg_trgm; psycopg 3 |
+| Search | pgvector cosine + Postgres full-text, RRF fusion |
+| Documents | python-docx; sources from thuvienphapluat.vn |
+| Google | google-api-python-client + google-auth (service account, Sheets + Drive read-only) |
+| CLI, config | Typer, pydantic-settings (`.env`) |
+| Deployment | Docker, Docker Compose (`db` + `bot`, restart unless-stopped) |
+| Quality | pytest, ruff, custom eval harness |
 
 ## Requirements
 
